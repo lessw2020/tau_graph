@@ -6,15 +6,19 @@ from typing import Iterable, List, Optional
 
 import torch
 import torch.fx as fx
+import torch.utils._pytree as pytree
+from torch.distributed._spmd.comm_tensor import _get_tracer
+from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
+from torch.utils._pytree import tree_flatten, tree_map
 
-from .graph_utils import (
+from utils.graph_utils import (
     OP,
     get_node_tensor_numel,
     get_output_node,
     graph_cleanup,
     pretty_print_graph,
 )
-from .log_utils import rank0_debug
+from utils.log_utils import rank0_debug
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -108,7 +112,7 @@ def _scan_graph_for_fusion_elements(
         "clone",
         "_tensor_constant",
         "_tensor_constant",
-        CommType,
+        comm_type,
         "comm_result",
         "getitem",
         "getitem",
@@ -162,9 +166,39 @@ def _scan_graph_for_fusion_elements(
     return element_list
 
 
+def _fuse_elements(
+    left: FusionElement,
+    right: FusionElement,
+    gm: fx.GraphModule,
+) -> bool:
+    """takes two fusion elements and merges them into a single graph comm operation"""
+
+    def get_shape(node):
+        tdata = node.meta.get("tensor_meta")
+        m, n = tdata.shape
+        return (m, n)
+
+    rank0_debug(logger, f"fe inspection {left=}")
+    rank0_debug(logger, f"right inspection {right=}")
+
+    left_shape = get_shape(left.clone_node)
+    right_shape = get_shape(right.clone_node)
+
+    rank0_debug(
+        logger, f"left shape = {left_shape}, right_shape = {right_shape}"
+    )
+
+    total_size = left.size + right.size
+
+    def load_buffer(a, b, buffer):
+        pass
+
+    return True
+
+
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
     """main entry into remapping graph for all_reduce fusion"""
-
+    rank0_debug(logger, "entered main comm_fusion run...\n")
     result = False
 
     # get our main graph info
@@ -173,6 +207,9 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     # scan graph for all comm sections (fusion elements)
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
+
+    # start fusion
+    res = _fuse_elements(fe_list[0], fe_list[1], gm)
 
     # final review print
     graph_cleanup(gm)
