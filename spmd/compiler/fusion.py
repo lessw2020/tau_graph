@@ -182,16 +182,71 @@ def _fuse_elements(
     rank0_debug(logger, f"right inspection {right=}")
 
     left_shape = get_shape(left.clone_node)
+    left_size = left.size
     right_shape = get_shape(right.clone_node)
+    right_size = right.size
 
     rank0_debug(
         logger, f"left shape = {left_shape}, right_shape = {right_shape}"
     )
 
-    total_size = left.size + right.size
+    buffer_size = left.size + right.size
 
-    def load_buffer(a, b, buffer):
-        pass
+    def load_buffer(
+        buffer,
+        buffer_size,
+        left,
+        left_size,
+        right,
+        right_size,
+    ):
+
+        buffer[0:left_size] = left.view(-1)
+        buffer[left_size:buffer_size] = right.view(-1)
+
+    buffer = torch.empty(buffer_size)
+
+    left_tensor = torch.randn(left_shape)
+    right_tensor = torch.randn(right_shape)
+
+    traced = make_fx(load_buffer)(
+        buffer,
+        buffer_size,
+        left_tensor,
+        left_size,
+        right_tensor,
+        right_size,
+    )
+
+    rank0_debug(logger, f"traced = {traced.graph}")
+
+    def unpack_buffer(
+        buffer,
+        left,
+        left_size,
+        left_shape,
+        right,
+        right_size,
+        right_shape,
+    ):
+        left.copy_(buffer[0:left_size].view(left_shape))
+
+        right.copy_(
+            buffer[left_size : left_size + right_size].view(right_shape)
+        )
+
+    traced_unpack = make_fx(unpack_buffer)(
+        buffer,
+        left_tensor,
+        left_size,
+        left_shape,
+        right_tensor,
+        right_size,
+        right_shape,
+    )
+
+    rank0_debug(logger, f"traced = {traced.graph}")
+    rank0_debug(logger, f" unpack graph\n {traced_unpack.graph}")
 
     return True
 
