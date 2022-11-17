@@ -23,6 +23,8 @@ from .log_utils import rank0_info
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+from .fusion import run_comm_fusion
+
 
 class TrainingPhase(Enum):
     FORWARD = auto()
@@ -313,6 +315,10 @@ def _convert_to_distributed(
             raise ValueError(f"Unrecognized node {node}")
 
     _rebuild_graph(gm, node_replacements)
+
+    if training_phase == TrainingPhase.BACKWARD:
+        print(f"\nlive 134 ++++++++++++++++++++++++++++++++++++++++\n")
+        res = run_comm_fusion(gm)
 
     return make_boxed_func(gm)
 

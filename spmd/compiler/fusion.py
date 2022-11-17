@@ -6,6 +6,10 @@ from typing import Iterable, List, Optional
 
 import torch
 import torch.fx as fx
+import torch.utils._pytree as pytree
+from torch.distributed._spmd.comm_tensor import _get_tracer
+from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
+from torch.utils._pytree import tree_flatten, tree_map
 
 from .graph_utils import (
     OP,
@@ -47,10 +51,11 @@ class FusionElement:
 @dataclass
 class GraphInfo:
     len: int = 0
-    global_buffer: Optional[fx.Node] = None
+    global_buffer_node: Optional[fx.Node] = None
     global_buffer_size: int = 0
     output: Optional[fx.Node] = None
     first: Optional[fx.Node] = None
+    placeholder_nodes: Optional[fx.Node] = field(default_factory=lambda: [])
 
     def update_info(self, gm: fx.GraphModule) -> None:
         """get the len, input and output nodes"""
@@ -63,8 +68,9 @@ class GraphInfo:
 
         for i, node in enumerate(nodelist):
             if node.op == OP.PLACEHOLDER:
-                self.first = node
-                break
+                self.placeholder_nodes.append(node)
+
+        self.first_placeholder = self.placeholder_nodes[0]
 
         self.output = get_output_node(gm)
         assert (
@@ -73,26 +79,46 @@ class GraphInfo:
 
         rank0_debug(
             logger,
-            f"updated graph_info - len = {self.len} input = {self.first}, output = {self.output}",
+            f"global graph_info - len = {self.len} input = {self.first_placeholder}, output = {self.output}",
         )
 
 
 def _insert_fusion_buffer_node(
-    gm: fx.GraphModule, insert_before_node: fx.Node, buffer_size: Iterable[int]
+    gm: fx.GraphModule, gi: GraphInfo, buffer_size: Iterable[int]
 ) -> fx.Node:
-    """insert a torch.empty node in front of insert_before_node"""
-    with gm.graph.inserting_before(insert_before_node):
+    """insert a torch.empty node after last placeholder node"""
+    insert_after_node = gi.placeholder_nodes[-1]
+    rank0_debug(
+        logger,
+        f"\n----> global buffer insert after node = {insert_after_node.name}",
+    )
+
+    with gm.graph.inserting_after(insert_after_node):
         new_buffer_node = gm.graph.create_node(
             OP.CALL_FUNCTION,
             target=torch.empty,
             # TODO - need device from DTensor to put buffer on gpu
-            args=tuple(buffer_size),
+            args=(buffer_size,),
         )
     assert (
         new_buffer_node is not None
     ), f"failed to create buffer node, size={buffer_size}"
 
+    gi.global_buffer_node = new_buffer_node
+
     return new_buffer_node
+
+
+def _insert_fusion_loader(
+    gm: fx.GraphModule,
+    gi: GraphInfo,
+    list_to_fuse: list[FusionElement],
+    fuse_location: int,
+    buffer_size: int,
+):
+    """given a list of fusion candidates, insert the buffer load portion into the graph
+    fuse_location = index in the list to fuse for where to insert the loading"""
+    pass
 
 
 def _scan_graph_for_fusion_elements(
@@ -108,7 +134,7 @@ def _scan_graph_for_fusion_elements(
         "clone",
         "_tensor_constant",
         "_tensor_constant",
-        CommType,
+        comm_type,
         "comm_result",
         "getitem",
         "getitem",
@@ -162,22 +188,118 @@ def _scan_graph_for_fusion_elements(
     return element_list
 
 
+def _fuse_elements(
+    left: FusionElement,
+    right: FusionElement,
+    gm: fx.GraphModule,
+) -> bool:
+    """takes two fusion elements and merges them into a single graph comm operation"""
+
+    def get_shape(node):
+        tdata = node.meta.get("tensor_meta")
+        m, n = tdata.shape
+        return (m, n)
+
+    rank0_debug(logger, f"fe inspection {left=}")
+    rank0_debug(logger, f"right inspection {right=}")
+
+    left_shape = get_shape(left.clone_node)
+    left_size = left.size
+    right_shape = get_shape(right.clone_node)
+    right_size = right.size
+
+    rank0_debug(
+        logger, f"left shape = {left_shape}, right_shape = {right_shape}"
+    )
+
+    buffer_size = left.size + right.size
+
+    def load_buffer(
+        buffer,
+        buffer_size,
+        left,
+        left_size,
+        right,
+        right_size,
+    ):
+
+        buffer[0:left_size] = left.view(-1)
+        buffer[left_size:buffer_size] = right.view(-1)
+
+    buffer = torch.empty(buffer_size)
+
+    left_tensor = torch.randn(left_shape)
+    right_tensor = torch.randn(right_shape)
+
+    traced = make_fx(load_buffer)(
+        buffer,
+        buffer_size,
+        left_tensor,
+        left_size,
+        right_tensor,
+        right_size,
+    )
+
+    rank0_debug(logger, f"traced = {traced.graph}")
+
+    def unpack_buffer(
+        buffer,
+        left,
+        left_size,
+        left_shape,
+        right,
+        right_size,
+        right_shape,
+    ):
+        left.copy_(buffer[0:left_size].view(left_shape))
+
+        right.copy_(
+            buffer[left_size : left_size + right_size].view(right_shape)
+        )
+
+    traced_unpack = make_fx(unpack_buffer)(
+        buffer,
+        left_tensor,
+        left_size,
+        left_shape,
+        right_tensor,
+        right_size,
+        right_shape,
+    )
+
+    rank0_debug(logger, f"traced = {traced.graph}")
+    rank0_debug(logger, f" unpack graph\n {traced_unpack.graph}")
+
+    return True
+
+
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
     """main entry into remapping graph for all_reduce fusion"""
 
+    rank0_debug(logger, "entered main comm_fusion run 134...\n")
     result = False
 
     # get our main graph info
     graph_info = GraphInfo()
     graph_info.update_info(gm)
+    rank0_debug(logger, f"graph info {graph_info}")
 
     # scan graph for all comm sections (fusion elements)
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
 
-    # final review print
-    graph_cleanup(gm)
+    # TODO - determine optimal reusable buffer size...for this test, use 200
 
-    pretty_print_graph(gm, "final version, fusion pass")
+    global_fusion_buffer = _insert_fusion_buffer_node(gm, graph_info, 200)
+    rank0_debug(logger, f"added global fusion_buffer node")
+    rank0_debug(logger, f"{gm.graph}")
+
+    # start fusion
+    # res = _fuse_elements(fe_list[0], fe_list[1], gm)
+
+    # final review print
+    # graph_cleanup(gm)
+
+    # pretty_print_graph(gm, "final version, fusion pass")
 
     result = True  # TODO - make this mean something
     return result
