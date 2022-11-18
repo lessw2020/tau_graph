@@ -24,7 +24,7 @@ from .log_utils import rank0_debug
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-debug = partial(rank0_debug, logger)
+_debug = partial(rank0_debug, logger)
 
 
 # enum for the supported fusion comm types
@@ -292,9 +292,67 @@ def _map_nodes(gm):
     return mapping
 
 
-def _clean_wait_graph(gm, fe_list):
+def _remove_gradient_tensor_clones(gm: fx.GraphModule) -> int:
+    """Optimizes away any duplicate gradient tensor nodes from the provided graph.
+    Returns - total count of clone tensor nodes removed"""
 
-    curr_fe = fe_list[0]
+    count_clones_removed = 0
+    sequence = ["clone", "_tensor_constant0", "_tensor_constant1", "allreduce_"]
+    len_sequence = len(sequence) - 1
+    _debug(f"{len_sequence=}")
+    index = 0
+    clone_node = None
+    comm_node = None
+
+    for i, node in enumerate(gm.graph.nodes):
+
+        if node.op == OP.PLACEHOLDER:
+            index = 0
+            continue
+
+        pattern = sequence[index]
+        _debug(f"in loop -> index = {index}, node = {node.name}, {pattern=}")
+
+        if (
+            index == 0
+            and node.op == OP.CALL_FUNCTION
+            and node.name.startswith(pattern)
+        ):
+            clone_node = node
+            index += 1
+            continue
+
+        elif index < len_sequence and node.name.startswith(pattern):
+            index += 1
+            continue
+
+        elif (
+            index == len_sequence
+            and node.op == OP.CALL_FUNCTION
+            and node.name.startswith(pattern)
+        ):
+            # found matching clone/comm sequence...
+            grad_tensor_node = clone_node.args[0]
+            comm_node = node
+            _debug(
+                f"preparing to relink - {grad_tensor_node.name} to {comm_node.name}, removing clone {clone_node.name}, {clone_node.args}"
+            )
+            comm_node.update_arg(0, [grad_tensor_node])
+
+            # reset for next series
+            count_clones_removed += 1
+            index = 0
+        else:
+            # failed sequence
+            index = 0
+
+    if count_clones_removed:
+        graph_cleanup(gm)
+    _debug(
+        f"_clean_grad_tensor_clones removed {count_clones_removed} clone nodes..."
+    )
+    return count_clones_removed
+
     nodemap = _map_nodes(gm)  # create_node_map(curr_fe.node_list)
 
     debug(f"node map via partial = {nodemap}")
@@ -331,18 +389,26 @@ def run_comm_fusion(gm: fx.GraphModule) -> Optional[fx.GraphModule]:
     graph_info.update_info(gm)
     rank0_debug(logger, f"graph info {graph_info}")
 
+    _debug(f"graph pre clone node optimization {gm.graph.print_tabular()}")
+
+    clones_removed = _remove_gradient_tensor_clones(gm)
+
+    _debug(
+        f"\n\n\n===> graph pre clone node optimization {gm.graph.print_tabular()}"
+    )
+
     # scan graph for all comm sections (fusion elements)
-    fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
+    # fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
 
     # TODO - determine optimal reusable buffer size...for this test, use 200
 
-    global_fusion_buffer = _insert_fusion_buffer_node(gm, graph_info, 200)
+    # global_fusion_buffer = _insert_fusion_buffer_node(gm, graph_info, 200)
 
-    rank0_debug(logger, f"added global fusion_buffer node")
-    rank0_debug(logger, f"\n{gm.graph}\n")
+    # rank0_debug(logger, f"added global fusion_buffer node")
+    # rank0_debug(logger, f"\n{gm.graph}\n")
 
     # clean up subgraph
-    _clean_wait_graph(gm, fe_list)
+    # _clean_wait_graph(gm, fe_list)
 
     # start fusion
     # res = _fuse_elements(fe_list[0], fe_list[1], gm)

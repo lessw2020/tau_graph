@@ -86,6 +86,7 @@ def _get_dtensor_dispatch_graph(
             return arg
 
     args = tree_map(remap_arg, node.args)
+    rank0_info(logger, f"dispatch node args = {args}")
     # kwargs in this set of tests are all constants
     kwargs = cast(Dict[str, object], node.kwargs)
 
@@ -108,6 +109,10 @@ def _get_dtensor_dispatch_graph(
         kwargs,
         DTensor._op_to_rules,
     )
+
+    rank0_info(logger, f"{target_schema=}")
+    rank0_info(logger, f"{redistribute=}")
+    rank0_info(logger, f"{output_sharding=}")
 
     flatten_args, args_tree_spec = tree_flatten(args)
     flatten_args_schema, _ = tree_flatten(target_schema.args_schema)
@@ -137,6 +142,10 @@ def _get_dtensor_dispatch_graph(
         specs=specs,
     )
 
+    rank0_info(
+        logger, f"\n======\n\n dtensor dispatch graph before fx = {dispatch}"
+    )
+
     def unwrap_local(e: object) -> object:
         return e._local_tensor if isinstance(e, DTensor) else e
 
@@ -156,9 +165,15 @@ def _build_dummy_add_graph(
         return grad + zero
 
     grad: torch.Tensor = dt._local_tensor
-    zero: torch.Tensor = torch.zeros_like(dt._local_tensor)
+    zero: torch.Tensor = torch.zeros_like(
+        dt._local_tensor, device=dt._local_tensor.device
+    )
 
     traced_add = make_fx(dummy_add)(grad, zero)
+    rank0_info(
+        logger,
+        f"\n\n\n==========\nsubgraph for dummy add dispatch = {traced_add}",
+    )
 
     placeholders = [n for n in traced_add.graph.nodes if n.op == OP.PLACEHOLDER]
     call_functions = [
@@ -172,6 +187,8 @@ def _build_dummy_add_graph(
     traced_dispatch = _get_dtensor_dispatch_graph(
         call_functions[0], node_to_obj
     )
+
+    rank0_info(logger, f"subgraph for dummy add dispatch = {traced_dispatch}")
 
     traced_dispatch.graph.lint()
 
