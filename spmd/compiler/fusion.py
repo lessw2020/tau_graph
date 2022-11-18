@@ -11,6 +11,8 @@ from torch.distributed._spmd.comm_tensor import _get_tracer
 from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
 from torch.utils._pytree import tree_flatten, tree_map
 
+from functools import partial
+
 from .graph_utils import (
     OP,
     get_node_tensor_numel,
@@ -21,6 +23,9 @@ from .graph_utils import (
 from .log_utils import rank0_debug
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+debug = partial(rank0_debug, logger)
+
 
 # enum for the supported fusion comm types
 class CommType(str, Enum):
@@ -273,7 +278,49 @@ def _fuse_elements(
     return True
 
 
-def run_comm_fusion(gm: fx.GraphModule) -> bool:
+def _create_node_map(nodelist):
+    newdict = {}
+    for node in nodelist:
+        newdict[node.name] = node
+    return newdict
+
+
+def _map_nodes(gm):
+    mapping = {}
+    for node in gm.graph.nodes:
+        mapping[node.name] = node
+    return mapping
+
+
+def _clean_wait_graph(gm, fe_list):
+
+    curr_fe = fe_list[0]
+    nodemap = _map_nodes(gm)  # create_node_map(curr_fe.node_list)
+
+    debug(f"node map via partial = {nodemap}")
+
+    #
+    debug(f"current graph = {gm.graph.print_tabular()}\n")
+    allreduce_node = nodemap["allreduce__default"]
+    debug(f"allreduce node = {allreduce_node.name}")
+    t14node = nodemap["t_14"]  # curr_fe.prev_node
+    debug(f"allreduce args and type {[type(x) for x in allreduce_node.args]}")
+    allreduce_node.update_arg(0, [t14node])
+
+    debug(f"all_reduce new args = {allreduce_node.args}\n")
+
+    # second one
+    allreduce_node1 = nodemap["allreduce__default_1"]
+    debug(f"allreduce node = {allreduce_node1.name}")
+    t11node = nodemap["t_11"]  # curr_fe.prev_node
+    debug(f"allreduce args and type {[type(x) for x in allreduce_node1.args]}")
+    allreduce_node1.update_arg(0, [t11node])
+
+    gm.recompile()
+    debug(f"{gm.graph}\n")
+
+
+def run_comm_fusion(gm: fx.GraphModule) -> Optional[fx.GraphModule]:
     """main entry into remapping graph for all_reduce fusion"""
 
     rank0_debug(logger, "entered main comm_fusion run 134...\n")
@@ -290,16 +337,20 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # TODO - determine optimal reusable buffer size...for this test, use 200
 
     global_fusion_buffer = _insert_fusion_buffer_node(gm, graph_info, 200)
+
     rank0_debug(logger, f"added global fusion_buffer node")
-    rank0_debug(logger, f"{gm.graph}")
+    rank0_debug(logger, f"\n{gm.graph}\n")
+
+    # clean up subgraph
+    _clean_wait_graph(gm, fe_list)
 
     # start fusion
     # res = _fuse_elements(fe_list[0], fe_list[1], gm)
 
     # final review print
-    # graph_cleanup(gm)
+    graph_cleanup(gm)
 
-    # pretty_print_graph(gm, "final version, fusion pass")
+    pretty_print_graph(gm, "final version, fusion pass")
 
     result = True  # TODO - make this mean something
-    return result
+    return gm

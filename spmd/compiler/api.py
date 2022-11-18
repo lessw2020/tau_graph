@@ -318,7 +318,8 @@ def _convert_to_distributed(
 
     if training_phase == TrainingPhase.BACKWARD:
         print(f"\nlive 134 ++++++++++++++++++++++++++++++++++++++++\n")
-        res = run_comm_fusion(gm)
+        fused_gm = run_comm_fusion(gm)
+        return make_boxed_func(fused_gm)
 
     return make_boxed_func(gm)
 
