@@ -230,8 +230,9 @@ def _copy_fe_to_buffer(
     pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
     pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
 
-    insert_node = fe_list[-1].prev_node
-    _debug(f" f229 insert after node = {insert_node.name}\n")
+    insert_node = fe_list[-1].comm_node
+
+    _debug(f" f229 insert before comm node = {insert_node.name}\n")
 
     # verify first node
     for node in gm.graph.nodes:
@@ -304,7 +305,7 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
             pl_list.append(node)
 
     #
-    insert_node = fe_list[-1].wait_node
+    insert_node = fe_list[-1].next_node  # before last node of FE section
     _debug(f" f308 scatter to insert node after = {insert_node.name}\n")
     value_remap = {}
 
