@@ -293,11 +293,17 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
         tlist.append(a)  # clone().detach())
 
     scatter_sg = make_fx(scatter_from_buffer)(buffer, tlist)
-    _debug(f"==== {scatter_sg.graph.print_tabular()}\n")
+    _debug(f"f296 ==== {scatter_sg.graph.print_tabular()}\n")
+
+    pl_list = []
+
+    for node in scatter_sg.graph.nodes:
+        if node.op == OP.PLACEHOLDER:
+            pl_list.append(node)
 
     #
     insert_node = fe_list[-1].wait_node
-    _debug(f" f88 copy to insert node = {insert_node.name}\n")
+    _debug(f" f308 scatter to insert node after = {insert_node.name}\n")
     value_remap = {}
 
     # verify first node
@@ -309,17 +315,30 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
         f" compare insert nodes, true {id(true_insert_node)} vs fe list {id(insert_node)}"
     )
 
+    # create placeholder remapping
+    pl_map = {}
+    pl_map[pl_list[0]] = gi.global_buffer
+    pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
+    pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
+
+    def remap_args(in_node: fx.Node) -> fx.Node:
+        out_node = in_node
+        if in_node in pl_map:
+            out_node = pl_map[in_node]
+            _debug(f"f332 remapped {in_node.name} to {out_node.name}")
+        return out_node
+
     with gm.graph.inserting_after(true_insert_node):
         for innernode in scatter_sg.graph.nodes:
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
             print(f"about to insert {innernode.name}")
             value_remap[innernode] = gm.graph.node_copy(
-                innernode  # , lambda x: value_remap[x]
+                innernode, remap_args  # , lambda x: value_remap[x]
             )
 
     # insert into main graph, just above last fe
-    _debug(f"f310  ^^$$\n {gm.graph.print_tabular()}")
+    _debug(f"f341  ^^$$\n {gm.graph.print_tabular()}")
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
