@@ -203,12 +203,45 @@ def _copy_fe_to_buffer(
     buffer = torch.empty(buffer_size)
     tlist = []
     for item in copy_list:
-        a = torch.zeros(item.shape[0], item.shape[1])
+        a = torch.zeros((item.shape[0], item.shape[1]))
         tlist.append(a)
     _debug(f"\n++++ tlist ++++ \n{len(tlist)}")
 
     buffer_sgraph = make_fx(copy_to_buffer)(buffer, tlist)
     _debug(f"==== {buffer_sgraph.graph.print_tabular()}\n")
+
+
+def _scatter_results_from_buffer(gi, gm, fe_list):
+    """after comm event with buffer, scatter results back to original fe tensors"""
+
+    buffer_node = gi.global_buffer
+    buffer_size = gi.global_buffer_size
+
+    scatter_list = fe_list
+
+    def scatter_from_buffer(buffer, scatter_list):
+        offset = 0
+        for t in scatter_list:
+            numel = t.numel()
+            shaper = buffer[offset : offset + numel].view(t.shape)
+
+            t.copy_(shaper)  # buffer[offset : offset + numel].view(t.shape() ))
+            offset += numel
+        return buffer
+
+    buffer = torch.empty(buffer_size)
+    # _debug(f"buffer shape {buffer.shape}")
+    tlist = []
+    for item in scatter_list:
+        shape = item.shape
+        _debug(f"shaper = {shape=}\n")
+        a = torch.zeros(item.shape[0], item.shape[1])
+        _debug(f"{a.shape=}")
+        tlist.append(a)  # clone().detach())
+    _debug(f"\n++++ tlist scatter ++++ \n{(tlist)}")
+
+    scatter_sgraph = make_fx(scatter_from_buffer)(buffer, tlist)
+    _debug(f"==== {scatter_sgraph.graph.print_tabular()}\n")
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
@@ -237,6 +270,10 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     # copy fe_items to buffer
     _copy_fe_to_buffer(gi, gm, fe_list[:2])
+
+    # TODO: use an all_reduce
+
+    _scatter_results_from_buffer(gi, gm, fe_list[:2])
 
     # final review print
     # graph_cleanup(gm)
