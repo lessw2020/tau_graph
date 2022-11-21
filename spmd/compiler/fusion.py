@@ -220,15 +220,18 @@ def _copy_fe_to_buffer(
     for node in load_gm.graph.nodes:
         _debug(f"f221 node {node.name}")
         if node.op == OP.PLACEHOLDER:
-            pl_list.append
+            pl_list.append(node)
         elif node.op == OP.CALL_FUNCTION:
-            fn_list.append
+            fn_list.append(node)
 
-    # insert one node
-    # first_sn = fn_list[0]
+    # create placeholder remapping
+    pl_map = {}
+    pl_map[pl_list[0]] = gi.global_buffer
+    pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
+    pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
+
     insert_node = fe_list[-1].prev_node
     _debug(f" f229 insert after node = {insert_node.name}\n")
-    value_remap = {}
 
     # verify first node
     for node in gm.graph.nodes:
@@ -239,17 +242,27 @@ def _copy_fe_to_buffer(
         f" compare insert nodes for {insert_node.name}, true {id(true_insert_node)} vs fe list {id(insert_node)}"
     )
 
+    def remap_args(node: fx.Node):
+        _debug(
+            f"f242 -  callback with  arg {node=}, type {type(node)} and args {node.args=} "
+        )
+        if node in pl_map:
+            original = node
+            node = pl_map[node]
+            _debug(f"f251 remapping {original} to {node} ")
+        return node
+
+    value_remap = {}
     with gm.graph.inserting_after(true_insert_node):
         for innernode in reversed(load_gm.graph.nodes):
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
             print(f"about to insert {innernode.name}")
-            value_remap[innernode] = gm.graph.node_copy(
-                innernode  # , lambda x: value_remap[x]
-            )
+            value_remap[innernode] = gm.graph.node_copy(innernode, remap_args)
 
     # insert into main graph, just above last fe
-    _debug(f"f242  ^^$$\n {gm.graph.print_tabular()}")
+    _debug(f"f260 = {value_remap=}\n")
+    _debug(f"f261remapping1  ^^$$\n {gm.graph.print_tabular()}")
 
 
 def _scatter_results_from_buffer(gi, gm, fe_list):
@@ -334,6 +347,9 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
 
     gi.global_buffer = buffer_node
+    _debug(
+        f"f345 inserted buffer node {gi.global_buffer.name}, {gi.global_buffer.target}"
+    )
     gi.global_buffer_size = test_buffer_size
 
     # copy fe_items to buffer
