@@ -208,16 +208,16 @@ def _copy_fe_to_buffer(
         tlist.append(a)
     _debug(f"\n++++ tlist ++++ \n{len(tlist)}")
 
-    sgraph = make_fx(copy_to_buffer)(buffer, tlist)
+    load_gm = make_fx(copy_to_buffer)(buffer, tlist)
 
-    _debug(f"^^^^^^\n {sgraph.graph.print_tabular()}\n")
+    _debug(f"^^^^^^\n {load_gm.graph.print_tabular()}\n")
 
-    subnodemap = create_graph_node_map(sgraph)
+    subnodemap = create_graph_node_map(load_gm)
 
     # update load loop to use main graph items
     fn_list = []
     pl_list = []
-    for node in sgraph.graph.nodes:
+    for node in load_gm.graph.nodes:
         _debug(f"f221 node {node.name}")
         if node.op == OP.PLACEHOLDER:
             pl_list.append
@@ -226,8 +226,8 @@ def _copy_fe_to_buffer(
 
     # insert one node
     # first_sn = fn_list[0]
-    insert_node = fe_list[-1].node_list[0]
-    _debug(f" f229 copy to insert node = {insert_node.name}\n")
+    insert_node = fe_list[-1].prev_node
+    _debug(f" f229 insert after node = {insert_node.name}\n")
     value_remap = {}
 
     # verify first node
@@ -236,11 +236,11 @@ def _copy_fe_to_buffer(
             true_insert_node = node
 
     _debug(
-        f" compare insert nodes, true {id(true_insert_node)} vs fe list {id(insert_node)}"
+        f" compare insert nodes for {insert_node.name}, true {id(true_insert_node)} vs fe list {id(insert_node)}"
     )
 
-    with gm.graph.inserting_before(true_insert_node):
-        for innernode in sgraph.graph.nodes:
+    with gm.graph.inserting_after(true_insert_node):
+        for innernode in reversed(load_gm.graph.nodes):
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
             print(f"about to insert {innernode.name}")
@@ -314,21 +314,24 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     result = False
 
+    # first recompile to make sure we have coherent graph
+    gm.recompile()
+
     # get our main graph info
     gi = GraphInfo()
     gi.update_info(gm)
 
     _debug(f"{gm.graph.print_tabular()}")
 
-    # scan graph for all comm sections (fusion elements)
-    fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
-
-    _debug(f"\n----- fe_list {len(fe_list)} -------- \n {fe_list}\n")
+    # _debug(f"\n----- fe_list {len(fe_list)} -------- \n {fe_list}\n")
 
     # compute optimal buffer size here.... # TODO
     test_buffer_size = 200
 
     buffer_node = _insert_fusion_buffer_node(gm, test_buffer_size)
+
+    # scan graph for all comm sections (fusion elements)
+    fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
 
     gi.global_buffer = buffer_node
     gi.global_buffer_size = test_buffer_size
