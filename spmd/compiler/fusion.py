@@ -44,6 +44,7 @@ class FusionElement:
     output_name: str = ""
     comm_node: Optional[fx.Node] = None
     wait_node: Optional[fx.Node] = None
+    grad_tensor_node: Optional[fx.Node] = None
 
 
 @dataclass
@@ -156,15 +157,17 @@ def _scan_graph_for_fusion_elements(
                 # need to fully populate this fe...
                 # we will be removing/rewriting the node list so we save prev and next
                 fe.prev_node = curr_node_list[0].prev
+                _debug(f"prev node = {fe.prev_node}")
                 fe.next_node = node.next
 
                 fe.output_name = node.name
                 fe.wait_node = node
+                fe.comm_node = curr_node_list[2]
 
-                fe.clone_node = curr_node_list[0]
-                fe.comm_node = curr_node_list[3]
+                fe.grad_tensor_node = fe.comm_node.args[0][0]
 
-                fe.size = get_node_tensor_numel(fe.clone_node)  # type: ignore
+                fe.size = get_node_tensor_numel(fe.grad_tensor_node)  # type: ignore
+
                 element_list.append(fe)
 
             index = 0
@@ -172,6 +175,24 @@ def _scan_graph_for_fusion_elements(
             continue
 
     return element_list
+
+
+def _copy_fe_to_buffer(
+    gi: GraphInfo, gm: fx.GraphModule, fe_list: list[FusionElement]
+) -> None:
+    """first half of fusion - move desired items to buffer and create graph"""
+    buffer_node = gi.global_buffer
+    buffer_size = gi.global_buffer_size
+
+    copy_list = fe_list
+
+    def copy_to_buffer(buffer, copy_list):
+        offset = 0
+        for t in copy_list:
+            size = t.size
+            buffer[offset : offset + size] = t.view(-1)
+            offset += size
+        return buffer
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
@@ -197,6 +218,9 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     gi.global_buffer = buffer_node
     gi.global_buffer_size = test_buffer_size
+
+    # copy fe_items to buffer
+    _copy_fe_to_buffer(gi, gm, fe_list[:2])
 
     # final review print
     # graph_cleanup(gm)
