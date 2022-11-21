@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Iterable, List, Optional
 from functools import partial
 from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
+import torch.distributed as dist
 
 import torch
 import torch.fx as fx
@@ -95,6 +96,14 @@ def _insert_fusion_buffer_node(
         insert_before_node = node
         _debug(f"\n{insert_before_node.name=}\n")
         break
+    # TODO - fix with correct rank
+
+    rank = dist.get_rank()
+    if torch.distributed.is_initialized():
+        torch.cuda.set_device(rank)
+    rank_device = torch.cuda.current_device()
+
+    _debug(f"f105 device = {rank_device=}")
 
     with gm.graph.inserting_before(insert_before_node):
         new_buffer_node = gm.graph.create_node(
@@ -102,6 +111,7 @@ def _insert_fusion_buffer_node(
             target=torch.empty,
             # TODO - need device from DTensor to put buffer on gpu
             args=(buffer_size,),
+            kwargs={"device": rank_device},
         )
     assert (
         new_buffer_node is not None
@@ -184,13 +194,13 @@ def _scan_graph_for_fusion_elements(
 
 
 def _copy_fe_to_buffer(
-    gi: GraphInfo, gm: fx.GraphModule, fe_list: list[FusionElement]
+    gi: GraphInfo, gm: fx.GraphModule, in_fe_list: list[FusionElement]
 ) -> None:
     """first half of fusion - move desired items to buffer and create graph"""
     buffer_node = gi.global_buffer
     buffer_size = gi.global_buffer_size
 
-    copy_list = fe_list
+    copy_list = in_fe_list
 
     def copy_to_buffer(buffer, tensor_list):
         offset = 0
@@ -227,10 +237,10 @@ def _copy_fe_to_buffer(
     # create placeholder remapping
     pl_map = {}
     pl_map[pl_list[0]] = gi.global_buffer
-    pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
-    pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
+    pl_map[pl_list[1]] = in_fe_list[0].grad_tensor_node
+    pl_map[pl_list[2]] = in_fe_list[1].grad_tensor_node
 
-    insert_node = fe_list[-1].comm_node
+    insert_node = in_fe_list[-1].comm_node
 
     _debug(f" f229 insert before comm node = {insert_node.name}\n")
 
@@ -265,6 +275,12 @@ def _copy_fe_to_buffer(
 
     # insert into main graph, just above last fe
     _debug(f"f260 = {value_remap=}\n")
+
+    # update allreduce to use buffer
+    buffer_comm_node = in_fe_list[-1].comm_node
+    buffer_comm_node.update_arg(0, [buffer_node])
+    _debug(f"f272 new comm node = {buffer_comm_node.args=}")
+
     _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
 
 
@@ -381,20 +397,29 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # copy fe_items to buffer
     _copy_fe_to_buffer(gi, gm, fe_list[:2])
 
-    # TODO: use an all_reduce
-    second_ar = fe_list[1].comm_node
-    _debug(f"second ar tensor {second_ar.args[0][0].name}\n")
-
-    second_ar.update_arg(0, [buffer_node])
-    _debug(f"{second_ar.args=}")
-    _debug(
-        f"\n$$$$$$ second ar graph \n {gm.graph.print_tabular()}\n $$$$$$$$$$$$$$ \n"
-    )
+    # TODO use buffer
 
     _scatter_results_from_buffer(gi, gm, fe_list[:2])
 
+    # try to output gradients directly
+    output_node = gi.output
+
+    grad1 = fe_list[0].grad_tensor_node
+    # output_node.update_arg(0, grad1)
+    grad2 = fe_list[1].wait_node
+    # output_node.update_arg(1, grad2)
+    new_output_args = [grad1, grad2, None]
+    gm.graph.erase_node(output_node)
+    gm.graph.output(new_output_args)
+
+    for node in reversed(gm.graph.nodes):
+        if node.op == OP.OUTPUT:
+            new_output = node
+            break
+    _debug(f"f424 updated output node args {new_output.args=}\n")
+
     # final review print
-    # graph_cleanup(gm)
+    graph_cleanup(gm)
 
     _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
 
