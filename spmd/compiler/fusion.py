@@ -242,27 +242,29 @@ def _copy_fe_to_buffer(
         f" compare insert nodes for {insert_node.name}, true {id(true_insert_node)} vs fe list {id(insert_node)}"
     )
 
-    def remap_args(node: fx.Node):
-        _debug(
-            f"f242 -  callback with  arg {node=}, type {type(node)} and args {node.args=} "
-        )
-        if node in pl_map:
-            original = node
-            node = pl_map[node]
-            _debug(f"f251 remapping {original} to {node} ")
-        return node
+    def remap_copy_args(in_node: fx.Node) -> fx.Node:
+        out_node = in_node
+        if in_node in pl_map:
+            out_node = pl_map[in_node]
+            _debug(f"f249 remapped {in_node.name} to {out_node.name}")
+        elif in_node in value_remap:
+            out_node = value_remap[in_node]
+            _debug(f"f252 remapped {in_node.name} to {out_node.name}")
+        return out_node
 
     value_remap = {}
-    with gm.graph.inserting_after(true_insert_node):
-        for innernode in reversed(load_gm.graph.nodes):
+    with gm.graph.inserting_before(true_insert_node):
+        for innernode in load_gm.graph.nodes:
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
             print(f"about to insert {innernode.name}")
-            value_remap[innernode] = gm.graph.node_copy(innernode, remap_args)
+            value_remap[innernode] = gm.graph.node_copy(
+                innernode, remap_copy_args
+            )
 
     # insert into main graph, just above last fe
     _debug(f"f260 = {value_remap=}\n")
-    _debug(f"f261remapping1  ^^$$\n {gm.graph.print_tabular()}")
+    _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
 
 
 def _scatter_results_from_buffer(gi, gm, fe_list):
@@ -321,23 +323,27 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
     pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
 
-    def remap_args(in_node: fx.Node) -> fx.Node:
+    def remap_scatter_args(in_node: fx.Node) -> fx.Node:
         out_node = in_node
         if in_node in pl_map:
             out_node = pl_map[in_node]
-            _debug(f"f332 remapped {in_node.name} to {out_node.name}")
+            _debug(f"f328 remapped {in_node.name} to {out_node.name}")
+        elif in_node in value_remap:
+            out_node = value_remap[in_node]
+            _debug(f"f331 remapped {in_node.name} to {out_node.name}")
         return out_node
 
-    with gm.graph.inserting_after(true_insert_node):
+    with gm.graph.inserting_before(true_insert_node):
         for innernode in scatter_sg.graph.nodes:
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
             print(f"about to insert {innernode.name}")
             value_remap[innernode] = gm.graph.node_copy(
-                innernode, remap_args  # , lambda x: value_remap[x]
+                innernode, remap_scatter_args  # , lambda x: value_remap[x]
             )
 
     # insert into main graph, just above last fe
+    _debug(f"f341 = {value_remap=}\n")
     _debug(f"f341  ^^$$\n {gm.graph.print_tabular()}")
 
 
