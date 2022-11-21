@@ -143,6 +143,7 @@ class Shard(Placement):
         """
         reduce and scatter a tensor on a mesh dimension
         """
+        print(f"\nplacement types 146")
         my_coordinate = mesh.get_coordinate_on_dim(mesh_dim)
         num_chunks = mesh.size(dim=mesh_dim)
         # TODO: what should happen if rank is not in the mesh?
@@ -253,6 +254,7 @@ class _Partial(Placement):
         shard_spec: Placement,
     ) -> torch.Tensor:
         # by default call reduce_shard_tensor of the shard_spec.
+        print(f"\nplacement types 256")
         shard_spec = cast(Shard, shard_spec)
         return shard_spec._reduce_shard_tensor(
             tensor, mesh, c10d.ReduceOp(self.reduce_op), mesh_dim  # type: ignore[call-arg]

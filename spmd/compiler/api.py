@@ -160,6 +160,8 @@ def _build_dummy_add_graph(
 
     traced_add = make_fx(dummy_add)(grad, zero)
 
+    _info(f"\n{traced_add.graph.print_tabular()}\n")
+
     placeholders = [n for n in traced_add.graph.nodes if n.op == OP.PLACEHOLDER]
     call_functions = [
         n for n in traced_add.graph.nodes if n.op == OP.CALL_FUNCTION
@@ -172,6 +174,10 @@ def _build_dummy_add_graph(
     traced_dispatch = _get_dtensor_dispatch_graph(
         call_functions[0], node_to_obj
     )
+    _info(
+        f"\ntraced dispatch graph info ================================>>>>>\n"
+    )
+    _info(f"\n{traced_dispatch.graph.print_tabular()=}\n")
 
     # rewrite graph to remove redundant clone
     traced_dispatch = _remove_clone_tensor(traced_dispatch)
@@ -197,6 +203,8 @@ def _remove_clone_tensor(subgm: fx.GraphModule) -> fx.GraphModule:
     subgm.graph.erase_node(clone_node)
 
     subgm.recompile()
+
+    # _info(f"graph ========= \n {subgm.graph}\n")
 
     return subgm
 
@@ -338,6 +346,11 @@ def _convert_to_distributed(
             raise ValueError(f"Unrecognized node {node}")
 
     _rebuild_graph(gm, node_replacements)
+
+    if training_phase == TrainingPhase.BACKWARD:
+        from .fusion import run_comm_fusion
+
+        gm = run_comm_fusion(gm)
 
     return make_boxed_func(gm)
 

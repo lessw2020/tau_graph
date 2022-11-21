@@ -17,6 +17,14 @@ from spmd.tensor.utils import (
     wrap,
 )
 
+_DEBUG_VERBOSE = True
+
+import torch.distributed as dist
+
+if dist.is_initialized() and dist.get_rank() == 0:
+    _rank = True
+else:
+    _rank = False
 
 """
 If _ENABLE_FALLBACK set to False, dispatch will fail when an op doesn't
@@ -26,7 +34,7 @@ _ENABLE_FALLBACK = False
 
 
 """
-Print information on ops input shape and sharding for debugging purposes.
+#print information on ops input shape and sharding for debugging purposes.
 """
 _DEBUG_VERBOSE = False
 
@@ -163,23 +171,32 @@ def propagate_input_sharding(
     # parse the operator schema
     func_schema = FunctionSchema.parse(str(op_call._schema))
     # unwrap the args/kwargs schema
-    args_schema = tree_map(unwrap_schema, args)
+    args_schema = tree_map(unwrap_schema, args)  # correct
     kwargs_schema = tree_map(unwrap_schema, kwargs)
 
+    # print(f"==> dispatch 177: args_schema = {args_schema}\n")
+    # #print(f"==> kwargs_schema = {kwargs_schema}\n")
+
     op_schema = OpSchema(func_schema, args_schema, kwargs_schema)
+    # print(
+    #    f"==> dispatch 182:  \n{args_schema=}\n,op_schema.args = {op_schema.args_schema=}\n,{func_schema=}"
+    # )
 
     if _DEBUG_VERBOSE and torch.distributed.get_rank() == 0:
-        print(f"{op_call}({op_schema})")
+        # print(f"{op_call}({op_schema})")
         local_shapes = tree_map(
             lambda t: t.to_local().shape
             if isinstance(t, dtensor.DTensor)
             else None,
             args,
         )
-        print(f"    local shapes: {local_shapes}")
+        # print(f"    local shapes: {local_shapes}")
 
     op_key = str(op_call)
     sharding_prop_func = op_to_rules.get(op_key, None)
+    # print(
+    #    f"disp 197: ===> sharding prop func = {sharding_prop_func} from {op_key=}"
+    # )
 
     if sharding_prop_func is None:
         # step 1. If there's not even one sharding rule
@@ -197,7 +214,18 @@ def propagate_input_sharding(
     # step 2. there's sharding propagation rule, run
     # sharding propagation to get output sharding
     try:
+        import torch.distributed as dist
+
+        rank = dist.get_rank()
+        # if rank == 0:
+        # print(f"\n dispatch 221: ----> {op_schema=}\n")
         output_sharding = sharding_prop_func(op_schema)
+
+        # if rank == 0:
+        # print(f"disp 225 sharding prop func after... {op_schema=}")
+        # print(
+        #    f"disp 227: \noutput sharding from sharding prop func = {output_sharding}\n"
+        # )
     except Exception as e:
         raise RuntimeError(
             f"Sharding propagation failed on op {op_key}.\n"
@@ -213,6 +241,7 @@ def propagate_input_sharding(
     # TODO: implement full auto distribute with a
     # simple cost estimation model
     if output_sharding.output_spec is None:
+        # print(f"\ndisp 240: inside auto sharding\n")
         # do auto distributed/boxing here
         if output_sharding.schema_suggestions is not None:
             # pick the first suggestion for now,
@@ -229,6 +258,7 @@ def propagate_input_sharding(
                 f"Failed reason: {output_sharding.failed_reason}"
             )
     else:
+        # print(f"dispatch 254: {op_schema=}\n++++\n{output_sharding=}\n")
         return op_schema, False, output_sharding
 
 
@@ -239,6 +269,9 @@ def operator_dispatch(
     op_to_rules: Dict[str, Callable[[OpSchema], OutputSharding]],
     custom_dispatch_ops: Dict[str, Callable[..., object]],
 ) -> object:
+
+    # print(f"\n dispatch.py 262, args = {args[0].shape}\n{args[1:]}\n")
+
     # first we need to lift some private aten aliases to public calls
     if op_call in _CURRENT_DECOMPOSITION_TABLE:
         return _CURRENT_DECOMPOSITION_TABLE[op_call](*args, **kwargs)
@@ -249,9 +282,17 @@ def operator_dispatch(
         # dispatch to user defined custom distributed tensor ops
         return custom_dispatch_ops[str(op_call)](*args, **kwargs)
 
+    # print(f"dispatch.py, 267: {op_call=}\n{args[1:]=}")
+
     target_schema, redistribute, output_sharding = propagate_input_sharding(
         op_call, args, kwargs, op_to_rules
     )
+
+    # print(f"\ndisp 289: {args[1:]}\n")
+
+    # print(
+    #    f"dispatch.py 292: {target_schema.args_schema[1:]=}\n{target_schema.args_schema[0]=}\n=====\n, {redistribute=}\n++++++, {output_sharding=}"
+    # )
 
     if output_sharding is None:
         # default to local tensor ops, this is wrong
@@ -268,6 +309,10 @@ def operator_dispatch(
         target_schema.args_schema,
         redistribute_with_schema=redistribute,
     )
+
+    # print(
+    #   f"\ndispatch 307 \n {args[0].shape=},\n,{args[1:]=}\n, {target_schema=}\n{target_schema.args_schema=}\n"
+    # )
     local_tensor_kwargs = pack_args_kwargs_with_local_tensor(
         kwargs,
         target_schema.kwargs_schema,
@@ -277,7 +322,13 @@ def operator_dispatch(
     # run local op computation with potentially modified args/kwargs
     local_tensor_args = cast(Tuple[object, ...], local_tensor_args)
     local_tensor_kwargs = cast(Dict[str, object], local_tensor_kwargs)
+    # print(
+    #    f"dispatch.py, 313, \n{local_tensor_args[0].shape=}, {local_tensor_kwargs=}\n++++++++++\n"
+    # )
+
     local_results = op_call(*local_tensor_args, **local_tensor_kwargs)
+
+    # print(f"dispatch 315 !!!!!!!:\n {local_results=}\n")
 
     if target_schema.is_inplace:
         # inplace op should return self instead of re-wrapping

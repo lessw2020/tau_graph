@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, List, Optional
+from functools import partial
 
 import torch
 import torch.fx as fx
@@ -16,7 +17,9 @@ from .graph_utils import (
 )
 from .log_utils import rank0_debug
 
+
 logger: logging.Logger = logging.getLogger(__name__)
+_debug = partial(rank0_debug, logger)
 
 # enum for the supported fusion comm types
 class CommType(str, Enum):
@@ -39,7 +42,6 @@ class FusionElement:
     next_node: Optional[fx.Node] = None  # node that was after end of section
     processed: bool = False
     output_name: str = ""
-    clone_node: Optional[fx.Node] = None
     comm_node: Optional[fx.Node] = None
     wait_node: Optional[fx.Node] = None
 
@@ -78,19 +80,29 @@ class GraphInfo:
 
 
 def _insert_fusion_buffer_node(
-    gm: fx.GraphModule, insert_before_node: fx.Node, buffer_size: Iterable[int]
+    gm: fx.GraphModule, buffer_size: Iterable[int]
 ) -> fx.Node:
     """insert a torch.empty node in front of insert_before_node"""
+
+    # default to inserting just after last placeholder node
+    for node in gm.graph.nodes:
+        if node.op == OP.PLACEHOLDER:
+            continue
+        insert_before_node = node
+        _debug(f"\n{insert_before_node.name=}\n")
+        break
+
     with gm.graph.inserting_before(insert_before_node):
         new_buffer_node = gm.graph.create_node(
             OP.CALL_FUNCTION,
             target=torch.empty,
             # TODO - need device from DTensor to put buffer on gpu
-            args=tuple(buffer_size),
+            args=(buffer_size,),
         )
     assert (
         new_buffer_node is not None
     ), f"failed to create buffer node, size={buffer_size}"
+    _debug(f"{new_buffer_node=}\n")
 
     return new_buffer_node
 
@@ -105,10 +117,10 @@ def _scan_graph_for_fusion_elements(
     element_list = []
 
     fe_sequence = [
-        "clone",
+        # "clone",
         "_tensor_constant",
         "_tensor_constant",
-        CommType,
+        comm_type,
         "comm_result",
         "getitem",
         "getitem",
@@ -168,16 +180,28 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     result = False
 
     # get our main graph info
-    graph_info = GraphInfo()
-    graph_info.update_info(gm)
+    gi = GraphInfo()
+    gi.update_info(gm)
+
+    _debug(f"{gm.graph.print_tabular()}")
 
     # scan graph for all comm sections (fusion elements)
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
 
-    # final review print
-    graph_cleanup(gm)
+    _debug(f"\n----- fe_list {len(fe_list)} -------- \n {fe_list}\n")
 
-    pretty_print_graph(gm, "final version, fusion pass")
+    # compute optimal buffer size here.... # TODO
+    test_buffer_size = 200
+
+    buffer_node = _insert_fusion_buffer_node(gm, test_buffer_size)
+
+    gi.global_buffer = buffer_node
+    gi.global_buffer_size = test_buffer_size
+
+    # final review print
+    # graph_cleanup(gm)
+
+    _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
 
     result = True  # TODO - make this mean something
-    return result
+    return gm

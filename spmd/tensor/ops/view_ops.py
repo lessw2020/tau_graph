@@ -182,6 +182,7 @@ def dim_atleast_3d(ndim: int) -> DimMap:
 def expand(input_shape: Shape, shape: Shape) -> DimMap:
     """Implements broadcast on multiple dimensions"""
     assert len(shape) >= len(input_shape)
+    print(f" view ops 185: \n {input_shape=}, \n{shape=}\n,")
 
     # 1. create padded input dimensions
     padded_input = dim_pad_left(len(input_shape), len(shape))
@@ -202,6 +203,7 @@ def expand(input_shape: Shape, shape: Shape) -> DimMap:
             if desired_s in (1, -1) or desired_s == actual_s
             else Broadcast.new(p, desired_s)
         )
+    print(f"view ops 206: {mapping=}\n")
     return tuple(mapping)
 
 
@@ -501,7 +503,10 @@ def propagate_shape_and_sharding(
     - An output dimension that is a split of the input dimension can only be sharded
       if the leftmost split size is divisible by the mesh dimension
     """
+    print(f"view ops 506: \n {in_shard=}, {mesh_sizes=}, {local_in_shape=}")
+
     assert len(in_shard) == len(mesh_sizes)
+
     sharded_in_dims: Set[int] = set(
         s.dim for s in in_shard if isinstance(s, Shard)
     )
@@ -625,10 +630,33 @@ def register_prop_rule_map(
         rules = spec.dim_map(*op_schema.args_schema, **op_schema.kwargs_schema)
         input_dtensor_spec = op_schema.args_schema[0]
 
+        print(
+            f"view ops 633: ===> input dtensor spec {input_dtensor_spec=}, \n{rules=}"
+        )
+        # adder = input_dtensor_spec.placements[0]
+        # print(f"adder = {adder}")
+        # if len(input_dtensor_spec.placements) < 2:
+        #    input_dtensor_spec.placements = [Shard(dim=0), Shard(dim=0)]
+        # input_dtensor_spec.placements.append(adder)
+
+        print(
+            f"\nview ops 642: ===> input dtensor spec {input_dtensor_spec.placements}\n-----------------\n"
+        )
+
+        print(f"===> reshape prop, {input_dtensor_spec=}")
+        print(f"===> rules from reshape {rules}\n")
+
         assert isinstance(
             input_dtensor_spec, DTensorSpec
         ), "Expected first input to be a DTensorSpec"
+
         global_in_shape = input_dtensor_spec.shape
+
+        print(f"====> global in shape = {global_in_shape}\n")
+
+        print(f"===> rules = {rules}")
+        print(f"====> {input_dtensor_spec.mesh.mesh.shape=}\n\n==========\n")
+
         assert global_in_shape is not None, "Shape required."
 
         (
