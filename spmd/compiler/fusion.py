@@ -363,6 +363,17 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     _debug(f"f341 = {value_remap=}\n")
     _debug(f"f341  ^^$$\n {gm.graph.print_tabular()}")
 
+    # force copies to have a user # TODO remove/fix this
+    for node in gm.graph.nodes:
+        if node.name.startswith("copy"):
+            _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
+            user = node.args[0]
+            node.users[user] = ""
+            _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
+
+    # print(gm.graph)
+    _debug(f"365 {print(gm.graph)}")
+
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
     """main entry into remapping graph for all_reduce fusion"""
