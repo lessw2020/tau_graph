@@ -224,7 +224,6 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
         for t in scatter_list:
             numel = t.numel()
             shaper = buffer[offset : offset + numel].view(t.shape)
-
             t.copy_(shaper)  # buffer[offset : offset + numel].view(t.shape() ))
             offset += numel
         return buffer
@@ -234,11 +233,10 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     tlist = []
     for item in scatter_list:
         shape = item.shape
-        _debug(f"shaper = {shape=}\n")
+
         a = torch.zeros(item.shape[0], item.shape[1])
-        _debug(f"{a.shape=}")
+
         tlist.append(a)  # clone().detach())
-    _debug(f"\n++++ tlist scatter ++++ \n{(tlist)}")
 
     scatter_sgraph = make_fx(scatter_from_buffer)(buffer, tlist)
     _debug(f"==== {scatter_sgraph.graph.print_tabular()}\n")
@@ -272,6 +270,14 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     _copy_fe_to_buffer(gi, gm, fe_list[:2])
 
     # TODO: use an all_reduce
+    second_ar = fe_list[1].comm_node
+    _debug(f"second ar tensor {second_ar.args[0][0].name}\n")
+
+    second_ar.update_arg(0, [buffer_node])
+    _debug(f"{second_ar.args=}")
+    _debug(
+        f"\n$$$$$$ second ar graph \n {gm.graph.print_tabular()}\n $$$$$$$$$$$$$$ \n"
+    )
 
     _scatter_results_from_buffer(gi, gm, fe_list[:2])
 
