@@ -28,7 +28,7 @@ def create_graph_node_map(gm: fx.GraphModule) -> Dict[str, fx.Node]:
     return mapping
 
 
-def get_node_tensor_numel(node: fx.Node) -> Optional[int]:
+def get_node_tensor_numel_shape(node: fx.Node) -> Optional[tuple]:
     """takes an fx node, and if tensor data available, optionally displays and returns numel"""
     size = None
     tdata = node.meta.get("tensor_meta")
@@ -38,10 +38,14 @@ def get_node_tensor_numel(node: fx.Node) -> Optional[int]:
 
     m, n = tdata.shape
     size = m * n
+    shape = (m, n)
 
-    rank0_debug(logger, f"--> tensor of size {size} found for {node=}\n")
+    rank0_debug(
+        logger,
+        f"--> tensor of size {size} and shape {shape} found for {node=}\n",
+    )
 
-    return size
+    return size, shape
 
 
 def get_output_node(gm: fx.GraphModule) -> Optional[fx.Node]:

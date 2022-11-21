@@ -4,13 +4,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, List, Optional
 from functools import partial
+from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
 
 import torch
 import torch.fx as fx
 
 from .graph_utils import (
     OP,
-    get_node_tensor_numel,
+    get_node_tensor_numel_shape,
     get_output_node,
     graph_cleanup,
     pretty_print_graph,
@@ -38,6 +39,7 @@ class FusionElement:
     comm_type: Optional[CommType] = None
     node_list: Optional[List[fx.Node]] = field(default_factory=lambda: [])  # type: ignore
     size: int = 0
+    shape: Optional[List[int]] = field(default_factory=lambda: [])  # type: ignore
     prev_node: Optional[fx.Node] = None  # node that was before start of section
     next_node: Optional[fx.Node] = None  # node that was after end of section
     processed: bool = False
@@ -166,7 +168,10 @@ def _scan_graph_for_fusion_elements(
 
                 fe.grad_tensor_node = fe.comm_node.args[0][0]
 
-                fe.size = get_node_tensor_numel(fe.grad_tensor_node)  # type: ignore
+                size, shape = get_node_tensor_numel_shape(fe.grad_tensor_node)  # type: ignore
+                fe.size = size
+                fe.shape = shape
+                _debug(f"\nfe list size shape {size=}, {shape=}\n")
 
                 element_list.append(fe)
 
@@ -189,10 +194,21 @@ def _copy_fe_to_buffer(
     def copy_to_buffer(buffer, copy_list):
         offset = 0
         for t in copy_list:
-            size = t.size
+            size = t.numel()
             buffer[offset : offset + size] = t.view(-1)
             offset += size
         return buffer
+
+    # setup dummy vars
+    buffer = torch.empty(buffer_size)
+    tlist = []
+    for item in copy_list:
+        a = torch.zeros(item.shape[0], item.shape[1])
+        tlist.append(a)
+    _debug(f"\n++++ tlist ++++ \n{len(tlist)}")
+
+    buffer_sgraph = make_fx(copy_to_buffer)(buffer, tlist)
+    _debug(f"==== {buffer_sgraph.graph.print_tabular()}\n")
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
