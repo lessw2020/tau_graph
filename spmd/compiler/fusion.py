@@ -15,6 +15,7 @@ from .graph_utils import (
     get_output_node,
     graph_cleanup,
     pretty_print_graph,
+    create_graph_node_map,
 )
 from .log_utils import rank0_debug
 
@@ -191,9 +192,9 @@ def _copy_fe_to_buffer(
 
     copy_list = fe_list
 
-    def copy_to_buffer(buffer, copy_list):
+    def copy_to_buffer(buffer, tensor_list):
         offset = 0
-        for t in copy_list:
+        for t in tensor_list:
             size = t.numel()
             buffer[offset : offset + size] = t.view(-1)
             offset += size
@@ -207,8 +208,48 @@ def _copy_fe_to_buffer(
         tlist.append(a)
     _debug(f"\n++++ tlist ++++ \n{len(tlist)}")
 
-    buffer_sgraph = make_fx(copy_to_buffer)(buffer, tlist)
-    _debug(f"==== {buffer_sgraph.graph.print_tabular()}\n")
+    sgraph = make_fx(copy_to_buffer)(buffer, tlist)
+
+    _debug(f"^^^^^^\n {sgraph.graph.print_tabular()}\n")
+
+    subnodemap = create_graph_node_map(sgraph)
+
+    # update load loop to use main graph items
+    fn_list = []
+    pl_list = []
+    for node in sgraph.graph.nodes:
+        _debug(f"f221 node {node.name}")
+        if node.op == OP.PLACEHOLDER:
+            pl_list.append
+        elif node.op == OP.CALL_FUNCTION:
+            fn_list.append
+
+    # insert one node
+    # first_sn = fn_list[0]
+    insert_node = fe_list[-1].node_list[0]
+    _debug(f" f229 copy to insert node = {insert_node.name}\n")
+    value_remap = {}
+
+    # verify first node
+    for node in gm.graph.nodes:
+        if node.name == insert_node.name:
+            true_insert_node = node
+
+    _debug(
+        f" compare insert nodes, true {id(true_insert_node)} vs fe list {id(insert_node)}"
+    )
+
+    with gm.graph.inserting_before(true_insert_node):
+        for innernode in sgraph.graph.nodes:
+            if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
+                continue
+            print(f"about to insert {innernode.name}")
+            value_remap[innernode] = gm.graph.node_copy(
+                innernode  # , lambda x: value_remap[x]
+            )
+
+    # insert into main graph, just above last fe
+    _debug(f"f242  ^^$$\n {gm.graph.print_tabular()}")
 
 
 def _scatter_results_from_buffer(gi, gm, fe_list):
@@ -238,8 +279,34 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
 
         tlist.append(a)  # clone().detach())
 
-    scatter_sgraph = make_fx(scatter_from_buffer)(buffer, tlist)
-    _debug(f"==== {scatter_sgraph.graph.print_tabular()}\n")
+    scatter_sg = make_fx(scatter_from_buffer)(buffer, tlist)
+    _debug(f"==== {scatter_sg.graph.print_tabular()}\n")
+
+    #
+    insert_node = fe_list[-1].wait_node
+    _debug(f" f88 copy to insert node = {insert_node.name}\n")
+    value_remap = {}
+
+    # verify first node
+    for node in gm.graph.nodes:
+        if node.name == insert_node.name:
+            true_insert_node = node
+
+    _debug(
+        f" compare insert nodes, true {id(true_insert_node)} vs fe list {id(insert_node)}"
+    )
+
+    with gm.graph.inserting_after(true_insert_node):
+        for innernode in scatter_sg.graph.nodes:
+            if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
+                continue
+            print(f"about to insert {innernode.name}")
+            value_remap[innernode] = gm.graph.node_copy(
+                innernode  # , lambda x: value_remap[x]
+            )
+
+    # insert into main graph, just above last fe
+    _debug(f"f310  ^^$$\n {gm.graph.print_tabular()}")
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
@@ -287,4 +354,5 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
 
     result = True  # TODO - make this mean something
+
     return gm
