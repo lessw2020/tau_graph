@@ -548,6 +548,8 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
         """update a node's metadata to the the new shape, dtype and/or memory format"""
         curr = node.meta.get("tensor_meta")
 
+        _debug(f"f551, starting meta = {curr=}")
+
         shape = curr.shape
         dtype = curr.dtype
         requires_grad = curr.requires_grad
@@ -557,9 +559,16 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
         is_quantized = curr.is_quantized
         qparams = curr.qparams
 
-        new_shape = shape_change
+        # new_shape = shape_change
 
-        _debug(f"548, curr shape = {shape}")
+        # force a torch.size
+        tempt = torch.empty(shape_change)
+        new_shape = tempt.shape
+        _debug(f"567, type of new_shape {type(new_shape)}")
+
+        _debug(
+            f"548, curr shape = {shape} of type {type(shape)}, new shape {new_shape}, of type {type(new_shape)}"
+        )
 
         new_metadata = TensorMetadata(
             new_shape,
@@ -571,7 +580,9 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
             qparams,
         )
 
-        _debug(f"574, new metadata = {new_metadata}")
+        _debug(
+            f"574, new metadata = {new_metadata} and shape type = {type(new_metadata.shape)}"
+        )
 
     modify_node = get_nodes["getitem_3"]
     _debug(f"577, global buffer size = {gi.global_buffer_size}")
