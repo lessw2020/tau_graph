@@ -282,11 +282,11 @@ def _copy_fe_to_buffer(
     # have to make our own all_reduce for the buffer otherwise tensor meta data is off and autograd errs out
     _build_buffer_comm_graph(gm, gi)
 
-    # buffer_comm_node = in_fe_list[-1].comm_node
-    # buffer_comm_node.update_arg(0, [buffer_node])
-    # _debug(f"f272 new comm node = {buffer_comm_node.args=}")
+    buffer_comm_node = in_fe_list[-1].comm_node
+    buffer_comm_node.update_arg(0, [buffer_node])
+    _debug(f"f272 new comm node = {buffer_comm_node.args=}")
 
-    # _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
+    _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
 
 
 def _build_buffer_comm_graph(gm, gi) -> fx.GraphModule:
@@ -406,10 +406,15 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     # force copies to have a user # TODO remove/fix this
     for node in gm.graph.nodes:
         if node.name.startswith("copy"):
-            _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
+            _debug(f"409 copy node {node.name=}, {node.users=}, {node.args=}")
             user = node.args[0]
             node.users[user] = ""
-            _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
+            _debug(f"412 copy node {node.name=}, {node.users=}, {node.args=}")
+        elif node.name.startswith("wait_"):
+            _debug(f"417 copy node {node.name=}, {node.users=}, {node.args=}")
+            user = node.args[0]
+            node.users[user] = ""
+            _debug(f"417 copy node {node.name=}, {node.users=}, {node.args=}")
 
     gm.recompile()
 
@@ -513,7 +518,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     grad1 = fe_list[0].grad_tensor_node
     # output_node.update_arg(0, grad1)
-    grad2 = fe_list[1].wait_node
+    grad2 = fe_list[1].grad_tensor_node
     # output_node.update_arg(1, grad2)
     new_output_args = [grad1, grad2, None]
     gm.graph.erase_node(output_node)
@@ -592,7 +597,15 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
         shape_change=gi.global_buffer_size,
     )
 
-    return
+    # update meta with new TensorMetadata
+    saved_meta = modify_node.meta.get("tensor_meta")
+
+    try:
+        modify_node.meta["tensor_meta"] = new_meta
+    except:
+        print(f"FAILED to update meta")
+
+    get_node_tensor_numel_shape(modify_node)
 
     # TensorMetadata(
     #    shape, dtype, requires_grad, stride, memory_format, is_quantized, qparams
@@ -601,5 +614,5 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
 
     result = True  # TODO - make this mean something
-
+    gm.recompile()
     return gm
