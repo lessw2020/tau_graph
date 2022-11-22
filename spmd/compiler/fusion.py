@@ -7,6 +7,8 @@ from functools import partial
 from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
 import torch.distributed as dist
 
+from torch.fx.passes.shape_prop import TensorMetadata, _extract_tensor_metadata
+
 import torch
 import torch.fx as fx
 
@@ -277,11 +279,49 @@ def _copy_fe_to_buffer(
     _debug(f"f260 = {value_remap=}\n")
 
     # update allreduce to use buffer
-    buffer_comm_node = in_fe_list[-1].comm_node
-    buffer_comm_node.update_arg(0, [buffer_node])
-    _debug(f"f272 new comm node = {buffer_comm_node.args=}")
+    # have to make our own all_reduce for the buffer otherwise tensor meta data is off and autograd errs out
+    _build_buffer_comm_graph(gm, gi)
 
-    _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
+    # buffer_comm_node = in_fe_list[-1].comm_node
+    # buffer_comm_node.update_arg(0, [buffer_node])
+    # _debug(f"f272 new comm node = {buffer_comm_node.args=}")
+
+    # _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
+
+
+def _build_buffer_comm_graph(gm, gi) -> fx.GraphModule:
+    """have to make our own all_reduce and wait subgraph for buffer"""
+    from torch.distributed._spmd.comm_tensor import CommTensor
+    from torch.distributed.distributed_c10d import (
+        all_reduce,
+        ReduceOp,
+        _get_default_group,
+        ProcessGroup,
+        Work,
+    )
+
+    buffer_size = gi.global_buffer_size
+
+    def dummy_add(
+        grad_buffer: torch.Tensor, zero: torch.Tensor
+    ) -> torch.Tensor:
+        return grad_buffer + zero
+
+    grad_buffer: torch.Tensor = torch.empty(buffer_size)
+    zero: torch.Tensor = torch.zeros_like(grad_buffer)
+
+    traced_add = make_fx(dummy_add)(grad_buffer, zero)
+
+    # TODO - needs to match to DTensor PG
+    pg = _get_default_group()
+    _debug(f"\n315  process group = {pg}")
+    tensor: torch.Tensor
+    op: ReduceOp = ReduceOp.SUM  # type: ignore[assignment]
+    async_op: bool = False
+
+    # work_handle = all_reduce(grad_buffer, op=op, group=pg, async_op=async_op)
+
+    _debug(f"303 \n{traced_add.graph.print_tabular()}\n")
 
 
 def _scatter_results_from_buffer(gi, gm, fe_list):
@@ -371,8 +411,63 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
             node.users[user] = ""
             _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
 
+    gm.recompile()
+
+    # TODO - another patch to update meta data
+    for node in gm.graph.nodes:
+        if node.name.startswith("getitem_3"):
+            _debug(
+                f"377 get item node {node.name=}, {node.users=}, {node.args=}"
+            )
+            tdata = node.meta.get("tensor_meta")
+
+            _debug(f"379 meta type = {type(tdata)}, data = {tdata}")
+            # tdata["shape"] = (200,)
+
+            # node.users[user] = ""
+            # _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
+    gm.recompile()
     # print(gm.graph)
     _debug(f"365 {print(gm.graph)}")
+
+
+def _get_all_nodes_of_type(
+    gm: fx.GraphModule,
+    node_type: OP,
+    starts_with: Optional[str] = None,
+    require_meta: bool = False,
+) -> dict:
+
+    results_dict = {}
+
+    for node in gm.graph.nodes:
+
+        starts_with_met = False
+        require_meta_met = False
+
+        if node.op != node_type:
+            continue
+
+        if starts_with is not None:
+            if node.name.startswith(starts_with):
+                starts_with_met = True
+        elif starts_with is None:
+            starts_with_met = True
+
+        if require_meta:
+            metadata = node.meta.get("tensor_meta")
+            if metadata:
+                require_meta_met = True
+        elif not require_meta:
+            require_meta_met
+
+        # add qualifying node
+        if starts_with_met and require_meta_met:
+            results_dict[node.name] = node
+
+    # _debug(f"439, found {len(results_dict)} of type {node_type}")
+
+    return results_dict
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
@@ -387,7 +482,8 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     gi = GraphInfo()
     gi.update_info(gm)
 
-    _debug(f"{gm.graph.print_tabular()}")
+    # _debug(f"{gm.graph.print_tabular()}")
+    _debug(f"\n Start of fusion pass graph {gm.graph.print_tabular()}\n")
 
     # _debug(f"\n----- fe_list {len(fe_list)} -------- \n {fe_list}\n")
 
@@ -429,10 +525,69 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
             break
     _debug(f"f424 updated output node args {new_output.args=}\n")
 
+    _debug(f"&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+
     # final review print
     graph_cleanup(gm)
 
-    _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
+    # try to adjust meta data
+    _debug(f"\n Start of meta pass graph {gm.graph.print_tabular()}\n")
+
+    # try to get attr
+    # graph_attrs = _get_all_nodes_of_type(gm, OP.GET_ATTR)
+
+    get_nodes = _get_all_nodes_of_type(
+        gm, OP.CALL_FUNCTION, starts_with="get", require_meta=True
+    )
+
+    _debug(f"\n541 ++++++++++++++++ \n{get_nodes=}\n")
+
+    def update_metadata(
+        node, shape_change: tuple, dtype=None, memory_format=None
+    ):
+        """update a node's metadata to the the new shape, dtype and/or memory format"""
+        curr = node.meta.get("tensor_meta")
+
+        shape = curr.shape
+        dtype = curr.dtype
+        requires_grad = curr.requires_grad
+        stride = curr.stride
+
+        memory_format = curr.memory_format
+        is_quantized = curr.is_quantized
+        qparams = curr.qparams
+
+        new_shape = shape_change
+
+        _debug(f"548, curr shape = {shape}")
+
+        new_metadata = TensorMetadata(
+            new_shape,
+            dtype,
+            requires_grad,
+            stride,
+            memory_format,
+            is_quantized,
+            qparams,
+        )
+
+        _debug(f"574, new metadata = {new_metadata}")
+
+    modify_node = get_nodes["getitem_3"]
+    _debug(f"577, global buffer size = {gi.global_buffer_size}")
+
+    new_meta = update_metadata(
+        modify_node,
+        shape_change=gi.global_buffer_size,
+    )
+
+    return
+
+    # TensorMetadata(
+    #    shape, dtype, requires_grad, stride, memory_format, is_quantized, qparams
+    # )
+
+    # _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
 
     result = True  # TODO - make this mean something
 

@@ -31,10 +31,11 @@ def create_graph_node_map(gm: fx.GraphModule) -> Dict[str, fx.Node]:
 def get_node_tensor_numel_shape(node: fx.Node) -> Optional[tuple]:
     """takes an fx node, and if tensor data available, optionally displays and returns numel"""
     size = None
+    shape = None
     tdata = node.meta.get("tensor_meta")
     if tdata is None:
         # assert tdata is not None, f"failed to locate metadata for node {node}"
-        return size
+        return size, shape
 
     m, n = tdata.shape
     size = m * n
