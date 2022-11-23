@@ -613,14 +613,27 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     buffer_node = _insert_fusion_buffer_node(gm, peak_memory_required, gi)
 
-    # copy fe_items to buffer # TODO - testing with 2 into 1...this should easily upgrade to any size
-    _copy_fe_to_buffer(gi, gm, fe_list[:2])
+    # Main process loop - iterate all fusion elements, apply fusion to subsets
 
-    _scatter_results_from_buffer(gi, gm, fe_list[:2])
+    offset = 0
+    count = 0
+    for index, item in enumerate(gi.fe_list):
+        count += 1
+        if count == fusion_policy:
+            curr_fe_list = gi.fe_list[offset : offset + count]
 
-    # switch wait_comms to output gradient nodes in output directly
-    # fusion will have removed and reworked existing wait_comms
-    _finalize_output_node(gi, gm, fe_list)
+            _copy_fe_to_buffer(gi, gm, curr_fe_list)
+
+            _scatter_results_from_buffer(gi, gm, curr_fe_list)
+
+            # switch wait_comms to output gradient nodes in output directly
+            # fusion will have removed and reworked existing wait_comms
+            _finalize_output_node(gi, gm, fe_list)
+
+            offset += count
+            count == 0
+
+    _debug(f"631, processed {index+1} fe items")
 
     # final verification of output node - # TODO remove as this is debugging util
     for node in reversed(gm.graph.nodes):
