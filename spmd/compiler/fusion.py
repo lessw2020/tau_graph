@@ -285,8 +285,7 @@ def _copy_fe_to_buffer(
                 innernode, remap_copy_args
             )
 
-    # insert into main graph, just above last fe
-    _debug(f"f260 = {value_remap=}\n")
+    _update_new_copy_nodes_users(value_remap)
 
     # update allreduce to use buffer
     # (we currently don't) have to make our own all_reduce/comm_wait section
@@ -295,6 +294,7 @@ def _copy_fe_to_buffer(
 
     buffer_comm_node = in_fe_list[-1].comm_node
     buffer_comm_node.update_arg(0, [buffer_node])
+
     _debug(f"f272 new comm node = {buffer_comm_node.args=}")
 
     _debug(f"f261 remapping\n {gm.graph.print_tabular()}")
@@ -375,7 +375,6 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     #
     insert_node = fe_list[-1].next_node  # before last node of FE section
     _debug(f" f308 scatter to insert node after = {insert_node.name}\n")
-    value_remap = {}
 
     # verify first node
     for node in gm.graph.nodes:
@@ -392,6 +391,9 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     for i in range(num_fe_items):
         pl_map[pl_list[i + 1]] = fe_list[i].grad_tensor_node
 
+    update_node_user_count: Dict[str, None] = {}
+    value_remap = {}
+
     def remap_scatter_args(in_node: fx.Node) -> fx.Node:
         out_node = in_node
         if in_node in pl_map:
@@ -400,6 +402,8 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
         elif in_node in value_remap:
             out_node = value_remap[in_node]
             _debug(f"f331 remapped {in_node.name} to {out_node.name}")
+
+        update_node_user_count[out_node] = ""
         return out_node
 
     with gm.graph.inserting_before(true_insert_node):
@@ -414,30 +418,24 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     _debug(f"f341 = {value_remap=}\n")
     _debug(f"f341  ^^$$\n {gm.graph.print_tabular()}")
 
+    _debug(f"421 - nodes we need to update users for {update_node_user_count=}")
+
     # force copies and waits to have a user
     # copies and waits do not have users by default, and will be
     # removed at recompile (can lead to lots of surprise/frustration)
     # # TODO this does not account for nodes beyond our own...remove/fix this
     # TODO - this is scanning entire graph every fusion...optimize
 
-    for node in gm.graph.nodes:
-        update_user = False
-        if node.name.startswith("copy"):
-            update_user = True
+    _update_new_copy_nodes_users(value_remap)
 
-        elif node.name.startswith("wait_"):
-            update_user = True
-
-        if update_user:
-            _debug(
-                f"426 copy or wait node pre user update len {len(node.users)}, {node.name=}, {node.users=}, {node.args=}"
-            )
-            # if len(node.users) == 0:
-            user = node.args[0]
-            node.users[user] = ""
-            assert (
-                len(node.users) > 0,
-            ), f"failed to update users for node {node.name}"
+    # also must update wait
+    section_wait_node = scatter_list[-1].wait_node
+    user = section_wait_node.args[0]
+    section_wait_node.users[user] = ""
+    _debug(f"445, section wait node user updated to {section_wait_node.users=}")
+    assert (
+        len(section_wait_node.users) > 0,
+    ), f"failed to update users for node {node.name}"
 
     gm.recompile()
 
@@ -458,6 +456,24 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     gm.recompile()
 
     _debug(f"446 {print(gm.graph)}")
+
+
+def _update_new_copy_nodes_users(value_remap):
+    """
+    we have to manually update users for new copy nodes to ensure count > 0.
+    This seems to be an fx bug, but for now we update or else fusion will get removed during graph linting
+    """
+    for subnode, node in value_remap.items():
+        if node.name.startswith("copy"):
+            _debug(
+                f"426 copy or wait node pre user update len {len(node.users)}, {node.name=}, {node.users=}, {node.args=}"
+            )
+            # if len(node.users) == 0:
+            user = node.args[0]
+            node.users[user] = ""
+            assert (
+                len(node.users) > 0,
+            ), f"failed to update users for node {node.name}"
 
 
 def _get_all_nodes_of_type(
