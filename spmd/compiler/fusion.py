@@ -427,7 +427,8 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
 
     gm.recompile()
 
-    # TODO - another patch to update meta data
+    # TODO - another patch to update meta data..hardcoded for first test.
+    # update to direct
     for node in gm.graph.nodes:
         if node.name.startswith("getitem_3"):
             _debug(
@@ -441,8 +442,8 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
             # node.users[user] = ""
             # _debug(f"369 copy node {node.name=}, {node.users=}, {node.args=}")
     gm.recompile()
-    # print(gm.graph)
-    _debug(f"365 {print(gm.graph)}")
+
+    _debug(f"446 {print(gm.graph)}")
 
 
 def _get_all_nodes_of_type(
@@ -479,14 +480,15 @@ def _get_all_nodes_of_type(
         if starts_with_met and require_meta_met:
             results_dict[node.name] = node
 
-    # _debug(f"439, found {len(results_dict)} of type {node_type}")
-
     return results_dict
 
 
 def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
     """update a node's metadata to the the new shape, dtype and/or memory format"""
     curr = node.meta.get("tensor_meta")
+    assert (
+        curr is not None
+    ), f"failed to obtain tensor meta data on node {node.name}"
 
     _debug(f"f551, starting meta = {curr=}")
 
@@ -499,16 +501,11 @@ def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
     is_quantized = curr.is_quantized
     qparams = curr.qparams
 
-    # new_shape = shape_change
+    # force a torch.size # TODO - this is not great to alloc a cpu empty just to make a torch.Size()
+    # find direct torch.Size() construction
 
-    # force a torch.size # TODO - this is not great to alloc a buffer just to make a torch.Size()
     tempt = torch.empty(shape_change)
     new_shape = tempt.shape
-    _debug(f"567, type of new_shape {type(new_shape)}")
-
-    _debug(
-        f"548, curr shape = {shape} of type {type(shape)}, new shape {new_shape}, of type {type(new_shape)}"
-    )
 
     new_metadata = TensorMetadata(
         new_shape,
@@ -535,6 +532,23 @@ def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
     return new_metadata
 
 
+def _finalize_output_node(gi, gm, fe_list):
+    """reworks output node to original grad tensors, replacing the wait_comms
+    warning - this only works after fusion is complete and graph updated,
+    otherwise recompile will blow away all comms if output is grad nodes!"""
+
+    output_node = gi.output
+    new_output_args = []
+    for item in fe_list:
+        grad_node = item.grad_tensor_node
+        new_output_args.append(grad_node)
+    new_output_args.append(None)
+    _debug(f"\n 572 - new output args = {new_output_args}\n ")
+
+    gm.graph.erase_node(output_node)
+    gm.graph.output(new_output_args)
+
+
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
     """main entry into remapping graph for all_reduce fusion"""
 
@@ -549,7 +563,10 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     _debug(f"\n Start of fusion pass graph {gm.graph.print_tabular()}\n")
 
-    # compute optimal buffer size here.... # TODO
+    # compute optimal buffer size here.... this will be based on either max bucket
+    # from external optimizer
+    # or we can scan the graph and auto-compute max size for any single fusion
+    # TODO
     test_buffer_size = 200
 
     buffer_node = _insert_fusion_buffer_node(gm, test_buffer_size, gi)
@@ -562,17 +579,11 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     _scatter_results_from_buffer(gi, gm, fe_list[:2])
 
-    # try to output gradients directly
-    output_node = gi.output
+    # switch wait_comms to output gradient nodes in output directly
+    # fusion will have removed and reworked existing wait_comms
+    _finalize_output_node(gi, gm, fe_list)
 
-    grad1 = fe_list[0].grad_tensor_node
-    # output_node.update_arg(0, grad1)
-    grad2 = fe_list[1].grad_tensor_node
-    # output_node.update_arg(1, grad2)
-    new_output_args = [grad1, grad2, None]
-    gm.graph.erase_node(output_node)
-    gm.graph.output(new_output_args)
-
+    # final verification of output node - # TODO remove as this is debugging util
     for node in reversed(gm.graph.nodes):
         if node.op == OP.OUTPUT:
             new_output = node
@@ -585,6 +596,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     graph_cleanup(gm)
 
     # try to adjust meta data
+    # TODO - formalize this...hardcoded to confirm it works below
     _debug(f"\n Start of meta pass graph {gm.graph.print_tabular()}\n")
 
     get_nodes = _get_all_nodes_of_type(
@@ -603,12 +615,6 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     )
 
     get_node_tensor_numel_shape(modify_node)
-
-    # TensorMetadata(
-    #    shape, dtype, requires_grad, stride, memory_format, is_quantized, qparams
-    # )
-
-    # _debug(f" {pretty_print_graph(gm, 'final version, fusion pass')}")
 
     result = True  # TODO - make this mean something
     gm.recompile()
