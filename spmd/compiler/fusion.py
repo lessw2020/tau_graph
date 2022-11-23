@@ -2,26 +2,25 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable, List, Optional, Dict
 from functools import partial
-from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
-import torch.distributed as dist
-
-from torch.fx.passes.shape_prop import TensorMetadata
+from typing import Dict, Iterable, List, Optional
 
 import torch
+import torch.distributed as dist
 import torch.fx as fx
+from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
+from torch.fx.passes.shape_prop import TensorMetadata
 
 from .graph_utils import (
     OP,
+    get_all_nodes_of_type,
+    create_graph_node_map,
     get_node_tensor_numel_shape,
     get_output_node,
     graph_cleanup,
     pretty_print_graph,
-    create_graph_node_map,
 )
 from .log_utils import rank0_debug
-
 
 logger: logging.Logger = logging.getLogger(__name__)
 _debug = partial(rank0_debug, logger)
@@ -304,11 +303,11 @@ def _build_buffer_comm_graph(gm, gi) -> fx.GraphModule:
     """have to make our own all_reduce and wait subgraph for buffer"""
     from torch.distributed._spmd.comm_tensor import CommTensor
     from torch.distributed.distributed_c10d import (
-        all_reduce,
-        ReduceOp,
-        _get_default_group,
         ProcessGroup,
+        ReduceOp,
         Work,
+        _get_default_group,
+        all_reduce,
     )
 
     buffer_size = gi.global_buffer_size
@@ -476,43 +475,6 @@ def _update_new_copy_nodes_users(value_remap):
             ), f"failed to update users for node {node.name}"
 
 
-def _get_all_nodes_of_type(
-    gm: fx.GraphModule,
-    node_type: OP,
-    starts_with: Optional[str] = None,
-    require_meta: bool = False,
-) -> Dict[str, fx.Node]:
-
-    results_dict = {}
-
-    for node in gm.graph.nodes:
-
-        starts_with_met = False
-        require_meta_met = False
-
-        if node.op != node_type:
-            continue
-
-        if starts_with is not None:
-            if node.name.startswith(starts_with):
-                starts_with_met = True
-        elif starts_with is None:
-            starts_with_met = True
-
-        if require_meta:
-            metadata = node.meta.get("tensor_meta")
-            if metadata:
-                require_meta_met = True
-        elif not require_meta:
-            require_meta_met
-
-        # add qualifying node
-        if starts_with_met and require_meta_met:
-            results_dict[node.name] = node
-
-    return results_dict
-
-
 def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
     """update a node's metadata to the the new shape, dtype and/or memory format"""
     curr = node.meta.get("tensor_meta")
@@ -565,7 +527,7 @@ def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
 def _finalize_output_node(gi, gm, fe_list):
     """reworks output node to original grad tensors, replacing the wait_comms
     warning - this only works after fusion is complete and graph updated,
-    otherwise recompile will blow away all comms if output is grad nodes!"""
+    otherwise recompile will blow away all comms if output is simply grad nodes!"""
 
     output_node = gi.output
     new_output_args = []
@@ -675,7 +637,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # TODO - formalize this...hardcoded to confirm it works below
     _debug(f"\n Start of meta pass graph {gm.graph.print_tabular()}\n")
 
-    get_nodes = _get_all_nodes_of_type(
+    get_nodes = get_all_nodes_of_type(
         gm, OP.CALL_FUNCTION, starts_with="get", require_meta=True
     )
 

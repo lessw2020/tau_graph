@@ -80,6 +80,43 @@ def pretty_print_graph(gm: fx.GraphModule, header: str = "graph") -> None:
     )
 
 
+def get_all_nodes_of_type(
+    gm: fx.GraphModule,
+    node_type: OP,
+    starts_with: Optional[str] = None,
+    require_meta: bool = False,
+) -> Dict[str, fx.Node]:
+
+    results_dict = {}
+
+    for node in gm.graph.nodes:
+
+        starts_with_met = False
+        require_meta_met = False
+
+        if node.op != node_type:
+            continue
+
+        if starts_with is not None:
+            if node.name.startswith(starts_with):
+                starts_with_met = True
+        elif starts_with is None:
+            starts_with_met = True
+
+        if require_meta:
+            metadata = node.meta.get("tensor_meta")
+            if metadata:
+                require_meta_met = True
+        elif not require_meta:
+            require_meta_met
+
+        # add qualifying node
+        if starts_with_met and require_meta_met:
+            results_dict[node.name] = node
+
+    return results_dict
+
+
 def graph_cleanup(gm: fx.GraphModule) -> None:
     """runs the required steps to ensure production-ready graph"""
 
