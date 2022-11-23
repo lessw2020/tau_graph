@@ -384,6 +384,7 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     )
 
     # create placeholder remapping
+    # TODO - hardcoded to two below...systematize it
     pl_map = {}
     pl_map[pl_list[0]] = gi.global_buffer_node
     pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
