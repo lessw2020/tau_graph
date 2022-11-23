@@ -609,8 +609,6 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # determine peak memory using fusion policy
     peak_memory_required = _determine_peak_memory(gi, fusion_policy)
 
-    # test_buffer_size = 200
-
     buffer_node = _insert_fusion_buffer_node(gm, peak_memory_required, gi)
 
     # Main process loop - iterate all fusion elements, apply fusion to subsets
@@ -631,7 +629,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
             _finalize_output_node(gi, gm, fe_list)
 
             offset += count
-            count == 0
+            count = 0
 
     _debug(f"631, processed {index+1} fe items")
 
