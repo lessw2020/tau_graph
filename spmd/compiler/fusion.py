@@ -7,7 +7,7 @@ from functools import partial
 from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
 import torch.distributed as dist
 
-from torch.fx.passes.shape_prop import TensorMetadata, _extract_tensor_metadata
+from torch.fx.passes.shape_prop import TensorMetadata
 
 import torch
 import torch.fx as fx
@@ -475,6 +475,57 @@ def _get_all_nodes_of_type(
     return results_dict
 
 
+def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
+    """update a node's metadata to the the new shape, dtype and/or memory format"""
+    curr = node.meta.get("tensor_meta")
+
+    _debug(f"f551, starting meta = {curr=}")
+
+    shape = curr.shape
+    dtype = curr.dtype
+    requires_grad = curr.requires_grad
+    stride = curr.stride
+
+    memory_format = curr.memory_format
+    is_quantized = curr.is_quantized
+    qparams = curr.qparams
+
+    # new_shape = shape_change
+
+    # force a torch.size # TODO - this is not great to alloc a buffer just to make a torch.Size()
+    tempt = torch.empty(shape_change)
+    new_shape = tempt.shape
+    _debug(f"567, type of new_shape {type(new_shape)}")
+
+    _debug(
+        f"548, curr shape = {shape} of type {type(shape)}, new shape {new_shape}, of type {type(new_shape)}"
+    )
+
+    new_metadata = TensorMetadata(
+        new_shape,
+        dtype,
+        requires_grad,
+        stride,
+        memory_format,
+        is_quantized,
+        qparams,
+    )
+
+    _debug(
+        f"574, new metadata = {new_metadata} and shape type = {type(new_metadata.shape)}"
+    )
+
+    # update meta with new TensorMetadata
+    saved_meta = node.meta.get("tensor_meta")
+
+    try:
+        node.meta["tensor_meta"] = new_metadata
+    except:
+        print(f"FAILED to update meta")
+
+    return new_metadata
+
+
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
     """main entry into remapping graph for all_reduce fusion"""
 
@@ -506,10 +557,8 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     )
     gi.global_buffer_size = test_buffer_size
 
-    # copy fe_items to buffer
+    # copy fe_items to buffer # TODO - testing with 2 into 1...this should easily upgrade to any size
     _copy_fe_to_buffer(gi, gm, fe_list[:2])
-
-    # TODO use buffer
 
     _scatter_results_from_buffer(gi, gm, fe_list[:2])
 
@@ -538,72 +587,20 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # try to adjust meta data
     _debug(f"\n Start of meta pass graph {gm.graph.print_tabular()}\n")
 
-    # try to get attr
-    # graph_attrs = _get_all_nodes_of_type(gm, OP.GET_ATTR)
-
     get_nodes = _get_all_nodes_of_type(
         gm, OP.CALL_FUNCTION, starts_with="get", require_meta=True
     )
 
     _debug(f"\n541 ++++++++++++++++ \n{get_nodes=}\n")
 
-    def update_metadata(
-        node, shape_change: tuple, dtype=None, memory_format=None
-    ):
-        """update a node's metadata to the the new shape, dtype and/or memory format"""
-        curr = node.meta.get("tensor_meta")
-
-        _debug(f"f551, starting meta = {curr=}")
-
-        shape = curr.shape
-        dtype = curr.dtype
-        requires_grad = curr.requires_grad
-        stride = curr.stride
-
-        memory_format = curr.memory_format
-        is_quantized = curr.is_quantized
-        qparams = curr.qparams
-
-        # new_shape = shape_change
-
-        # force a torch.size
-        tempt = torch.empty(shape_change)
-        new_shape = tempt.shape
-        _debug(f"567, type of new_shape {type(new_shape)}")
-
-        _debug(
-            f"548, curr shape = {shape} of type {type(shape)}, new shape {new_shape}, of type {type(new_shape)}"
-        )
-
-        new_metadata = TensorMetadata(
-            new_shape,
-            dtype,
-            requires_grad,
-            stride,
-            memory_format,
-            is_quantized,
-            qparams,
-        )
-
-        _debug(
-            f"574, new metadata = {new_metadata} and shape type = {type(new_metadata.shape)}"
-        )
-
+    # TODO - hardcoded reference
     modify_node = get_nodes["getitem_3"]
     _debug(f"577, global buffer size = {gi.global_buffer_size}")
 
-    new_meta = update_metadata(
+    new_meta = _update_metadata(
         modify_node,
         shape_change=gi.global_buffer_size,
     )
-
-    # update meta with new TensorMetadata
-    saved_meta = modify_node.meta.get("tensor_meta")
-
-    try:
-        modify_node.meta["tensor_meta"] = new_meta
-    except:
-        print(f"FAILED to update meta")
 
     get_node_tensor_numel_shape(modify_node)
 

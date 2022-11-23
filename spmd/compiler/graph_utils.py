@@ -37,9 +37,13 @@ def get_node_tensor_numel_shape(node: fx.Node) -> Optional[tuple]:
         # assert tdata is not None, f"failed to locate metadata for node {node}"
         return size, shape
 
-    m, n = tdata.shape
-    size = m * n
-    shape = (m, n)
+    if len(tdata.shape) == 1:
+        m = tdata.shape
+        shape = (m,)
+    else:
+        m, n = tdata.shape
+        size = m * n
+        shape = (m, n)
 
     rank0_debug(
         logger,
