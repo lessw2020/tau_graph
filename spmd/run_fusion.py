@@ -83,7 +83,7 @@ class replicaModel(nn.Module):
             def __init__(self, layer_count = 2, _with_bias=False):
                 super().__init__()
                 self.seq = nn.Sequential(
-                    *[nn.Linear(10,10, bias=_with_bias) for _ in range(layer_count)]
+                    *[nn.Linear(100,100, bias=_with_bias) for _ in range(layer_count)]
                 )
                 #self.module_list = nn.ModuleList(
                 #    [nn.Linear(10, 10) for _ in range(layer_count)]
@@ -165,7 +165,7 @@ def work_main(rank, world_size):
     #x = torch.randn(2, 10, 40).to(rank)
 
 
-    x = torch.randn(2, 10).to(rank)
+    x = torch.randn(2, 100).to(rank)
     if rank==0:
          print(f"\ninput tensor, first item = {x[0][0]:.4f}")
     #print(f"spmd mesh = {spmd._schema}")

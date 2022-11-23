@@ -61,6 +61,9 @@ class GraphInfo:
     """
 
     len: int = 0
+    num_starting_fe: int = 0
+    fe_list: list = None
+    peak_memory_required: int = 0
     global_buffer_node: Optional[fx.Node] = None
     global_buffer_size: int = 0
     first: Optional[fx.Node] = None
@@ -550,6 +553,30 @@ def _finalize_output_node(gi, gm, fe_list):
     gm.graph.output(new_output_args)
 
 
+def _determine_peak_memory(gi: GraphInfo, fusion_policy: int) -> int:
+    """
+    scans fe list to determine max memory required across all fusion instances.
+    this result is used to allocate the global buffer for fusion, where we
+    re-use a global buffer to avoid repeated allocations per fusion.
+    """
+    peak_memory = 0  # currently measured in numel
+    curr_memory = 0
+    fast_index = 0
+    for i, item in enumerate(gi.fe_list):
+        fast_index += 1
+        curr_memory += item.size
+
+        if fast_index == fusion_policy:
+            peak_memory = max(peak_memory, curr_memory)
+            fast_index = 0
+            curr_memory = 0
+
+    _debug(f"574, peak memory determined to be {peak_memory}")
+    gi.peak_memory_required = peak_memory
+
+    return peak_memory
+
+
 def run_comm_fusion(gm: fx.GraphModule) -> bool:
     """main entry into remapping graph for all_reduce fusion"""
 
@@ -564,16 +591,27 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     _debug(f"\n Start of fusion pass graph {gm.graph.print_tabular()}\n")
 
-    # compute optimal buffer size here.... this will be based on either max bucket
-    # from external optimizer
-    # or we can scan the graph and auto-compute max size for any single fusion
-    # TODO
-    test_buffer_size = 200
-
-    buffer_node = _insert_fusion_buffer_node(gm, test_buffer_size, gi)
-
     # scan graph for all comm sections (fusion elements)
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
+
+    gi.num_starting_fe = len(fe_list)
+    gi.fe_list = fe_list
+
+    # simple fusion policy where int = num buckets to fuse...start with 2,
+    # meaning every 2 comms are fused into 1
+    fusion_policy: int = 2
+
+    # compute optimal buffer size here....
+    # this will be based on either max bucket or bucket schedule from external optimizer
+    # or we can scan the graph and auto-compute max size for any single fusion
+    # TODO
+
+    # determine peak memory using fusion policy
+    peak_memory_required = _determine_peak_memory(gi, fusion_policy)
+
+    # test_buffer_size = 200
+
+    buffer_node = _insert_fusion_buffer_node(gm, peak_memory_required, gi)
 
     # copy fe_items to buffer # TODO - testing with 2 into 1...this should easily upgrade to any size
     _copy_fe_to_buffer(gi, gm, fe_list[:2])
