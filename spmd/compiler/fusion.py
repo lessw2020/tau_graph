@@ -55,11 +55,16 @@ class FusionElement:
 
 @dataclass
 class GraphInfo:
+    """provides a home for global aspects of this graph.
+    Currently tracks first and last node, len of the graph and
+    the location and size of the global buffer node
+    """
+
     len: int = 0
-    global_buffer: Optional[fx.Node] = None
+    global_buffer_node: Optional[fx.Node] = None
     global_buffer_size: int = 0
-    output: Optional[fx.Node] = None
     first: Optional[fx.Node] = None
+    output: Optional[fx.Node] = None
 
     def update_info(self, gm: fx.GraphModule) -> None:
         """get the len, input and output nodes"""
@@ -87,25 +92,25 @@ class GraphInfo:
 
 
 def _insert_fusion_buffer_node(
-    gm: fx.GraphModule, buffer_size: Iterable[int]
+    gm: fx.GraphModule, buffer_size: Iterable[int], gi: GraphInfo = None
 ) -> fx.Node:
-    """insert a torch.empty node in front of insert_before_node"""
+    """insert a torch.empty node for the global buffer.
+    defaults to first node after placeholder nodes.
+    appends to GlobalInfo if passed in"""
 
     # default to inserting just after last placeholder node
     for node in gm.graph.nodes:
         if node.op == OP.PLACEHOLDER:
             continue
         insert_before_node = node
-        _debug(f"\n{insert_before_node.name=}\n")
         break
-    # TODO - fix with correct rank
+
+    # TODO - fix with correct rank - needs to match with higher DTensor device
 
     rank = dist.get_rank()
     if torch.distributed.is_initialized():
         torch.cuda.set_device(rank)
     rank_device = torch.cuda.current_device()
-
-    _debug(f"f105 device = {rank_device=}")
 
     with gm.graph.inserting_before(insert_before_node):
         new_buffer_node = gm.graph.create_node(
@@ -118,7 +123,10 @@ def _insert_fusion_buffer_node(
     assert (
         new_buffer_node is not None
     ), f"failed to create buffer node, size={buffer_size}"
-    _debug(f"{new_buffer_node=}\n")
+
+    if gi is not None:
+        gi.global_buffer_node = new_buffer_node
+        gi.global_buffer_size = buffer_size
 
     return new_buffer_node
 
@@ -538,24 +546,15 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     gi = GraphInfo()
     gi.update_info(gm)
 
-    # _debug(f"{gm.graph.print_tabular()}")
     _debug(f"\n Start of fusion pass graph {gm.graph.print_tabular()}\n")
-
-    # _debug(f"\n----- fe_list {len(fe_list)} -------- \n {fe_list}\n")
 
     # compute optimal buffer size here.... # TODO
     test_buffer_size = 200
 
-    buffer_node = _insert_fusion_buffer_node(gm, test_buffer_size)
+    buffer_node = _insert_fusion_buffer_node(gm, test_buffer_size, gi)
 
     # scan graph for all comm sections (fusion elements)
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
-
-    gi.global_buffer = buffer_node
-    _debug(
-        f"f345 inserted buffer node {gi.global_buffer.name}, {gi.global_buffer.target}"
-    )
-    gi.global_buffer_size = test_buffer_size
 
     # copy fe_items to buffer # TODO - testing with 2 into 1...this should easily upgrade to any size
     _copy_fe_to_buffer(gi, gm, fe_list[:2])
