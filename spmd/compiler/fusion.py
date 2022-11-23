@@ -430,10 +430,14 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
 
         if update_user:
             _debug(
-                f"426 copy or wait node pre user update {node.name=}, {node.users=}, {node.args=}"
+                f"426 copy or wait node pre user update len {len(node.users)}, {node.name=}, {node.users=}, {node.args=}"
             )
+            # if len(node.users) == 0:
             user = node.args[0]
             node.users[user] = ""
+            assert (
+                len(node.users) > 0,
+            ), f"failed to update users for node {node.name}"
 
     gm.recompile()
 
@@ -662,15 +666,19 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     _debug(f"\n541 ++++++++++++++++ \n{get_nodes=}\n")
 
     # TODO - hardcoded reference
-    modify_node = get_nodes["getitem_3"]
+    modify_node = get_nodes.get("getitem_3")
+    assert (
+        modify_node is not None
+    ), "hardcoded check for getitem 3 failed..recompile has removed wait comm"
     _debug(f"577, global buffer size = {gi.global_buffer_size}")
 
-    new_meta = _update_metadata(
-        modify_node,
-        shape_change=gi.global_buffer_size,
-    )
+    if modify_node:
+        new_meta = _update_metadata(
+            modify_node,
+            shape_change=gi.global_buffer_size,
+        )
 
-    get_node_tensor_numel_shape(modify_node)
+        get_node_tensor_numel_shape(modify_node)
 
     result = True  # TODO - make this mean something
     gm.recompile()
