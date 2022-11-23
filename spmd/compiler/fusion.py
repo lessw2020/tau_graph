@@ -215,6 +215,8 @@ def _copy_fe_to_buffer(
 
     copy_list = in_fe_list
 
+    num_fusion_elements = len(copy_list)
+
     def copy_to_buffer(buffer, tensor_list):
         offset = 0
         for t in tensor_list:
@@ -229,11 +231,8 @@ def _copy_fe_to_buffer(
     for item in copy_list:
         a = torch.zeros((item.shape[0], item.shape[1]))
         tlist.append(a)
-    _debug(f"\n++++ tlist ++++ \n{len(tlist)}")
 
     load_gm = make_fx(copy_to_buffer)(buffer, tlist)
-
-    _debug(f"^^^^^^\n {load_gm.graph.print_tabular()}\n")
 
     subnodemap = create_graph_node_map(load_gm)
 
@@ -241,7 +240,6 @@ def _copy_fe_to_buffer(
     fn_list = []
     pl_list = []
     for node in load_gm.graph.nodes:
-        _debug(f"f221 node {node.name}")
         if node.op == OP.PLACEHOLDER:
             pl_list.append(node)
         elif node.op == OP.CALL_FUNCTION:
@@ -250,8 +248,9 @@ def _copy_fe_to_buffer(
     # create placeholder remapping
     pl_map = {}
     pl_map[pl_list[0]] = gi.global_buffer_node
-    pl_map[pl_list[1]] = in_fe_list[0].grad_tensor_node
-    pl_map[pl_list[2]] = in_fe_list[1].grad_tensor_node
+    for i in range(num_fusion_elements):
+        pl_map[pl_list[i + 1]] = in_fe_list[i].grad_tensor_node
+        # pl_map[pl_list[2]] = in_fe_list[1].grad_tensor_node
 
     insert_node = in_fe_list[-1].comm_node
 
@@ -281,7 +280,6 @@ def _copy_fe_to_buffer(
         for innernode in load_gm.graph.nodes:
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
-            print(f"about to insert {innernode.name}")
             value_remap[innernode] = gm.graph.node_copy(
                 innernode, remap_copy_args
             )
@@ -343,6 +341,7 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     buffer_size = gi.global_buffer_size
 
     scatter_list = fe_list
+    num_fe_items = len(scatter_list)
 
     def scatter_from_buffer(buffer, scatter_list):
         offset = 0
@@ -390,8 +389,9 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     # TODO - hardcoded to two below...systematize it
     pl_map = {}
     pl_map[pl_list[0]] = gi.global_buffer_node
-    pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
-    pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
+    for i in range(num_fe_items):
+        pl_map[pl_list[i + 1]] = fe_list[i].grad_tensor_node
+        # pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
 
     def remap_scatter_args(in_node: fx.Node) -> fx.Node:
         out_node = in_node
