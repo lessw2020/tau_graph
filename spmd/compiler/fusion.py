@@ -2,7 +2,7 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Dict
 from functools import partial
 from torch.fx.experimental.proxy_tensor import make_fx, proxy_slot
 import torch.distributed as dist
@@ -207,7 +207,7 @@ def _copy_fe_to_buffer(
     gi: GraphInfo, gm: fx.GraphModule, in_fe_list: list[FusionElement]
 ) -> None:
     """first half of fusion - move desired items to buffer and create graph"""
-    buffer_node = gi.global_buffer
+    buffer_node = gi.global_buffer_node
     buffer_size = gi.global_buffer_size
 
     copy_list = in_fe_list
@@ -246,7 +246,7 @@ def _copy_fe_to_buffer(
 
     # create placeholder remapping
     pl_map = {}
-    pl_map[pl_list[0]] = gi.global_buffer
+    pl_map[pl_list[0]] = gi.global_buffer_node
     pl_map[pl_list[1]] = in_fe_list[0].grad_tensor_node
     pl_map[pl_list[2]] = in_fe_list[1].grad_tensor_node
 
@@ -287,8 +287,9 @@ def _copy_fe_to_buffer(
     _debug(f"f260 = {value_remap=}\n")
 
     # update allreduce to use buffer
-    # have to make our own all_reduce for the buffer otherwise tensor meta data is off and autograd errs out
-    _build_buffer_comm_graph(gm, gi)
+    # (we currently don't) have to make our own all_reduce/comm_wait section
+    # # TODO - pg group matching
+    # _build_buffer_comm_graph(gm, gi)
 
     buffer_comm_node = in_fe_list[-1].comm_node
     buffer_comm_node.update_arg(0, [buffer_node])
@@ -335,7 +336,7 @@ def _build_buffer_comm_graph(gm, gi) -> fx.GraphModule:
 def _scatter_results_from_buffer(gi, gm, fe_list):
     """after comm event with buffer, scatter results back to original fe tensors"""
 
-    buffer_node = gi.global_buffer
+    buffer_node = gi.global_buffer_node
     buffer_size = gi.global_buffer_size
 
     scatter_list = fe_list
@@ -384,7 +385,7 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
 
     # create placeholder remapping
     pl_map = {}
-    pl_map[pl_list[0]] = gi.global_buffer
+    pl_map[pl_list[0]] = gi.global_buffer_node
     pl_map[pl_list[1]] = fe_list[0].grad_tensor_node
     pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
 
@@ -449,7 +450,7 @@ def _get_all_nodes_of_type(
     node_type: OP,
     starts_with: Optional[str] = None,
     require_meta: bool = False,
-) -> dict:
+) -> Dict[str, fx.Node]:
 
     results_dict = {}
 
