@@ -248,15 +248,16 @@ def _copy_fe_to_buffer(
     # create placeholder remapping
     pl_map = {}
     pl_map[pl_list[0]] = gi.global_buffer_node
+
     for i in range(num_fusion_elements):
         pl_map[pl_list[i + 1]] = in_fe_list[i].grad_tensor_node
-        # pl_map[pl_list[2]] = in_fe_list[1].grad_tensor_node
 
     insert_node = in_fe_list[-1].comm_node
 
     _debug(f" f229 insert before comm node = {insert_node.name}\n")
 
-    # verify first node
+    # TODO - this is debug only...remove
+    #  verify first node
     for node in gm.graph.nodes:
         if node.name == insert_node.name:
             true_insert_node = node
@@ -386,12 +387,10 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     )
 
     # create placeholder remapping
-    # TODO - hardcoded to two below...systematize it
     pl_map = {}
     pl_map[pl_list[0]] = gi.global_buffer_node
     for i in range(num_fe_items):
         pl_map[pl_list[i + 1]] = fe_list[i].grad_tensor_node
-        # pl_map[pl_list[2]] = fe_list[1].grad_tensor_node
 
     def remap_scatter_args(in_node: fx.Node) -> fx.Node:
         out_node = in_node
@@ -407,27 +406,34 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
         for innernode in scatter_sg.graph.nodes:
             if innernode.op in [OP.PLACEHOLDER, OP.OUTPUT]:
                 continue
-            print(f"about to insert {innernode.name}")
             value_remap[innernode] = gm.graph.node_copy(
-                innernode, remap_scatter_args  # , lambda x: value_remap[x]
+                innernode, remap_scatter_args
             )
 
     # insert into main graph, just above last fe
     _debug(f"f341 = {value_remap=}\n")
     _debug(f"f341  ^^$$\n {gm.graph.print_tabular()}")
 
-    # force copies to have a user # TODO remove/fix this
+    # force copies and waits to have a user
+    # copies and waits do not have users by default, and will be
+    # removed at recompile (can lead to lots of surprise/frustration)
+    # # TODO this does not account for nodes beyond our own...remove/fix this
+    # TODO - this is scanning entire graph every fusion...optimize
+
     for node in gm.graph.nodes:
+        update_user = False
         if node.name.startswith("copy"):
-            _debug(f"409 copy node {node.name=}, {node.users=}, {node.args=}")
-            user = node.args[0]
-            node.users[user] = ""
-            _debug(f"412 copy node {node.name=}, {node.users=}, {node.args=}")
+            update_user = True
+
         elif node.name.startswith("wait_"):
-            _debug(f"417 copy node {node.name=}, {node.users=}, {node.args=}")
+            update_user = True
+
+        if update_user:
+            _debug(
+                f"426 copy or wait node pre user update {node.name=}, {node.users=}, {node.args=}"
+            )
             user = node.args[0]
             node.users[user] = ""
-            _debug(f"417 copy node {node.name=}, {node.users=}, {node.args=}")
 
     gm.recompile()
 
