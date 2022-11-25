@@ -117,9 +117,12 @@ def get_all_nodes_of_type(
     return results_dict
 
 
-def graph_cleanup(gm: fx.GraphModule) -> None:
-    """runs the required steps to ensure production-ready graph"""
+def graph_cleanup(gm: fx.GraphModule, remove_dead_code: bool = True) -> None:
+    """runs the required steps to ensure production-ready graph.
+    note - per the fx docs, eliminate dead code is not very precise.
+    Hence, the flag to make this step optional."""
 
     gm.graph.lint()
-    gm.graph.eliminate_dead_code()
+    if remove_dead_code:
+        gm.graph.eliminate_dead_code()
     gm.recompile()
