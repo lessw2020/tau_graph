@@ -334,8 +334,10 @@ def _build_buffer_comm_graph(gm, gi) -> fx.GraphModule:
     _debug(f"303 \n{traced_add.graph.print_tabular()}\n")
 
 
-def _scatter_results_from_buffer(gi, gm, fe_list):
-    """after comm event with buffer, scatter results back to original fe tensors"""
+def _scatter_results_from_buffer(
+    gi: GraphInfo, gm: fx.GraphModule, fe_list: List[FusionElement]
+) -> None:
+    """after comm event with buffer, scatter results back to original fe grad tensors"""
 
     buffer_node = gi.global_buffer_node
     buffer_size = gi.global_buffer_size
@@ -352,7 +354,13 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
             offset += numel
         return buffer
 
+    # TODO - this is a dummy buffer that is never used,
+    # it is just a proxy for the global buffer node.
+    # consider simply saving and reusing a single dummy buffer
+
     buffer = torch.empty(buffer_size)
+    buffer_shape = buffer.shape
+    _debug(f"363, {buffer_shape=}\n")
     # _debug(f"buffer shape {buffer.shape}")
     tlist = []
     for item in scatter_list:
@@ -363,7 +371,7 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
         tlist.append(a)  # clone().detach())
 
     scatter_sg = make_fx(scatter_from_buffer)(buffer, tlist)
-    _debug(f"f296 ==== {scatter_sg.graph.print_tabular()}\n")
+    # _debug(f"f296 ==== {scatter_sg.graph.print_tabular()}\n")
 
     pl_list = []
 
@@ -373,9 +381,10 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
 
     #
     insert_node = fe_list[-1].next_node  # before last node of FE section
-    _debug(f" f308 scatter to insert node after = {insert_node.name}\n")
+    # _debug(f" f308 scatter to insert node after = {insert_node.name}\n")
 
     # verify first node
+    # TODO - this is purely debug checking below..remove
     for node in gm.graph.nodes:
         if node.name == insert_node.name:
             true_insert_node = node
@@ -427,7 +436,7 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
 
     _update_new_copy_nodes_users(value_remap)
 
-    # also must update wait
+    # also must update wait for the scatter section
     section_wait_node = scatter_list[-1].wait_node
     user = section_wait_node.args[0]
     section_wait_node.users[user] = ""
@@ -435,6 +444,26 @@ def _scatter_results_from_buffer(gi, gm, fe_list):
     assert (
         len(section_wait_node.users) > 0,
     ), f"failed to update users for node {node.name}"
+
+    # finally, need to update the graph TensorMetadata info (not a must, but ensures well formed graph)
+
+    last_get_item_node = scatter_list[-1].wait_node.args[0]
+    _debug(f"447, {last_get_item_node.name=}")
+    tensor_meta = last_get_item_node.meta.get("tensor_meta", None)
+    assert (
+        tensor_meta is not None
+    ), f"failed to get tensor metadata for last getitem node {last_get_item_node=}"
+
+    _debug(f"453, {tensor_meta=}\n")
+
+    # replace with buffer metadata
+    buffer_meta = gi.global_buffer_node.meta.get("tensor_meta", None)
+    _debug(f"459, {buffer_meta=}")
+
+    new_tensor_meta = _update_node_tensor_metadata(
+        last_get_item_node, new_shape=buffer_shape
+    )
+    _debug(f"466, new get item meta = {new_tensor_meta=}")
 
     gm.recompile()
 
@@ -475,7 +504,9 @@ def _update_new_copy_nodes_users(value_remap):
             ), f"failed to update users for node {node.name}"
 
 
-def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
+def _update_node_tensor_metadata(
+    node, new_shape: tuple, dtype=None, memory_format=None
+):
     """update a node's metadata to the the new shape, dtype and/or memory format"""
     curr = node.meta.get("tensor_meta")
     assert (
@@ -493,11 +524,8 @@ def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
     is_quantized = curr.is_quantized
     qparams = curr.qparams
 
-    # force a torch.size # TODO - this is not great to alloc a cpu empty just to make a torch.Size()
-    # find direct torch.Size() construction
-
-    tempt = torch.empty(shape_change)
-    new_shape = tempt.shape
+    # tempt = torch.empty(new_shape)
+    # new_shape = tempt.shape
 
     new_metadata = TensorMetadata(
         new_shape,
@@ -510,7 +538,7 @@ def _update_metadata(node, shape_change: tuple, dtype=None, memory_format=None):
     )
 
     _debug(
-        f"574, new metadata = {new_metadata} and shape type = {type(new_metadata.shape)}"
+        f"541, new metadata = {new_metadata} and shape type = {type(new_metadata.shape)}"
     )
 
     # update meta with new TensorMetadata
@@ -650,13 +678,14 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     ), "hardcoded check for getitem 3 failed..recompile has removed wait comm"
     _debug(f"577, global buffer size = {gi.global_buffer_size}")
 
-    if modify_node:
+    """if modify_node:
         new_meta = _update_metadata(
             modify_node,
             shape_change=gi.global_buffer_size,
         )
 
         get_node_tensor_numel_shape(modify_node)
+    """
 
     result = True  # TODO - make this mean something
     gm.recompile()
