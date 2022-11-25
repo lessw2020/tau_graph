@@ -642,6 +642,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
             # switch wait_comms to output gradient nodes in output directly
             # fusion will have removed and reworked existing wait_comms
+            # TODO - this will break atm for dynamic fusion...rework for unlimited fusion case.
             _finalize_output_node(gi, gm, fe_list)
 
             offset += count
@@ -661,32 +662,21 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     # final review print
     graph_cleanup(gm)
 
-    # try to adjust meta data
-    # TODO - formalize this...hardcoded to confirm it works below
     _debug(f"\n Start of meta pass graph {gm.graph.print_tabular()}\n")
+
+    # TODO - remove this.  This is purely a final check to verify all meta data
+    # related to fusion has been updated to use the buffer size rather than original.
 
     get_nodes = get_all_nodes_of_type(
         gm, OP.CALL_FUNCTION, starts_with="get", require_meta=True
     )
 
-    _debug(f"\n541 ++++++++++++++++ \n{get_nodes=}\n")
+    _debug(f"\672 ++++++++++++++++ \n{get_nodes=}\n")
+    # ---- end final meta tensors debug review -----------
 
-    # TODO - hardcoded reference
-    modify_node = get_nodes.get("getitem_3")
-    assert (
-        modify_node is not None
-    ), "hardcoded check for getitem 3 failed..recompile has removed wait comm"
     _debug(f"577, global buffer size = {gi.global_buffer_size}")
 
-    """if modify_node:
-        new_meta = _update_metadata(
-            modify_node,
-            shape_change=gi.global_buffer_size,
-        )
-
-        get_node_tensor_numel_shape(modify_node)
-    """
-
     result = True  # TODO - make this mean something
+
     gm.recompile()
     return gm
