@@ -146,7 +146,7 @@ def work_main(rank, world_size):
     
     #print(f"red {rank} = {red_tensor}")
 
-    layers = 2
+    layers = 4
     
     #model = Permute().to(rank) # 
     model = replicaModel(layer_count = layers).to(rank)

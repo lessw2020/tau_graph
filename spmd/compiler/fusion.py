@@ -44,12 +44,23 @@ class FusionElement:
     size: int = 0
     shape: Optional[List[int]] = field(default_factory=lambda: [])  # type: ignore
     prev_node: Optional[fx.Node] = None  # node that was before start of section
-    next_node: Optional[fx.Node] = None  # node that was after end of section
+    # next_node: Optional[fx.Node] = None  # node that was after end of section
     processed: bool = False
     output_name: str = ""
     comm_node: Optional[fx.Node] = None
     wait_node: Optional[fx.Node] = None
     grad_tensor_node: Optional[fx.Node] = None
+
+    def _get_next_node(
+        self,
+    ):
+        """get the next node from the FE section"""
+        next_node = self.node_list[-1].next
+        _debug(f"57, next node name is {next_node.name}")
+        assert (
+            next_node is not None
+        ), f"failed to get valid next node after {self.node_list[-1].name}"
+        return next_node
 
 
 @dataclass
@@ -380,9 +391,9 @@ def _scatter_results_from_buffer(
             pl_list.append(node)
 
     #
-    insert_node = fe_list[-1].next_node  # before last node of FE section
+    insert_node = fe_list[-1]._get_next_node()  # before last node of FE section
     # _debug(f" f308 scatter to insert node after = {insert_node.name}\n")
-
+    _debug(f"385 {insert_node=}\n")
     # verify first node
     # TODO - this is purely debug checking below..remove
     for node in gm.graph.nodes:
@@ -552,23 +563,29 @@ def _update_node_tensor_metadata(
     return new_metadata
 
 
-def _finalize_output_node(gi, gm, fe_list, start, stop):
-    """reworks output node to original grad tensors, replacing the wait_comms
-    warning - this only works after fusion is complete and graph updated,
-    otherwise recompile will blow away all comms if output is simply grad nodes!"""
+def _finalize_output_node(gi, gm, fe_list, start, stop, new_output_args):
+    """reworks output node args to original grad tensors, replacing the wait_comms
+    we update a copy of the output args, then finalized after all fusion is done."""
 
-    output_node = gi.output
-    new_output_args = []
+    # output_node = gi.output
+    # new_output_args = []
 
-    curr_output_args = list(gi.output.args[0])
+    # curr_output_args = list(gi.output.args[0])
+    replacement_mapping: Dict[fx.Node, fx.Node] = {}
 
+    # map out all updated nodes in our list
     for item in fe_list:
         grad_node = item.grad_tensor_node
-        new_output_args.append(grad_node)
+        wait_node = item.wait_node
+        replacement_mapping[wait_node] = grad_node
+        # new_output_args.append(grad_node)
     # new_output_args.append(None)
+    _debug(
+        f"583, ready to update main output with these replacements: {replacement_mapping}\n"
+    )
 
     _debug(f"\n 570 - new output args = {new_output_args}\n ")
-    for item in curr_output_args:
+    for item in new_output_args:
         if item is not None:
             _debug(f"572 - node {item.name}, type {type(item)}\n")
         else:
@@ -578,18 +595,18 @@ def _finalize_output_node(gi, gm, fe_list, start, stop):
     # TODO - this assumes that all gradient tensors are comm handled.
     for i in range(len(fe_list)):
         index = start + i
-        curr_node = curr_output_args[index]
+        curr_node = new_output_args[index]
         _debug(f"582 - node is {curr_node}")
         if curr_node is not None:
             assert curr_node.name.startswith(
                 "wait"
-            ), f"Non comm gradient output tensor incorrectly handled...needs fix. {curr_output_args[start+i]}"
-            curr_output_args[start + i] = new_output_args[i]
+            ), f"Non comm gradient output tensor incorrectly handled...needs fix. {new_output_args[start+i]}"
+            new_output_args[start + i] = replacement_mapping[curr_node]
+            _debug(
+                f"605, replacing {curr_node} with {replacement_mapping[curr_node]}"
+            )
 
-    _debug(f"577 - updated output args = {curr_output_args}\n")
-
-    gm.graph.erase_node(output_node)
-    gm.graph.output(curr_output_args)
+    _debug(f"577 - updated output args = {new_output_args}\n")
 
 
 def _determine_peak_memory(gi: GraphInfo, fusion_policy: int) -> int:
@@ -654,6 +671,13 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
 
     offset = 0
     count = 0
+    # new_output_args=[]
+    start_output_args = gi.output.args[0]
+    new_output_args = list(start_output_args)
+    _debug(f"671, starting output args {start_output_args}\n")
+
+    # ----------- main fusion loop ------------------------
+
     for index, item in enumerate(gi.fe_list):
         count += 1
         if count == fusion_policy:
@@ -669,10 +693,15 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
             # switch wait_comms to output gradient nodes in output directly
             # fusion will have removed and reworked existing wait_comms
             # TODO - this will break atm for dynamic fusion...rework for unlimited fusion case.
-            _finalize_output_node(gi, gm, curr_fe_list, start_index, stop_index)
+            _finalize_output_node(
+                gi, gm, curr_fe_list, start_index, stop_index, new_output_args
+            )
 
             offset += count
             count = 0
+    # update output with the updated args
+    gm.graph.erase_node(gi.output)
+    gm.graph.output(new_output_args)
 
     _debug(f"631, processed {index+1} fe items")
 
@@ -681,7 +710,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
         if node.op == OP.OUTPUT:
             new_output = node
             break
-    _debug(f"f424 updated output node args {new_output.args=}\n")
+    _debug(f"703, updated output node args {new_output.args=}\n")
 
     _debug(f"&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
 
