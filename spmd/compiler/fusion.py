@@ -552,21 +552,44 @@ def _update_node_tensor_metadata(
     return new_metadata
 
 
-def _finalize_output_node(gi, gm, fe_list):
+def _finalize_output_node(gi, gm, fe_list, start, stop):
     """reworks output node to original grad tensors, replacing the wait_comms
     warning - this only works after fusion is complete and graph updated,
     otherwise recompile will blow away all comms if output is simply grad nodes!"""
 
     output_node = gi.output
     new_output_args = []
+
+    curr_output_args = list(gi.output.args[0])
+
     for item in fe_list:
         grad_node = item.grad_tensor_node
         new_output_args.append(grad_node)
-    new_output_args.append(None)
-    _debug(f"\n 572 - new output args = {new_output_args}\n ")
+    # new_output_args.append(None)
+
+    _debug(f"\n 570 - new output args = {new_output_args}\n ")
+    for item in curr_output_args:
+        if item is not None:
+            _debug(f"572 - node {item.name}, type {type(item)}\n")
+        else:
+            _debug("572, None,  ending node found")
+
+    # we have fused a subset, only update that subset within the larger output node args
+    # TODO - this assumes that all gradient tensors are comm handled.
+    for i in range(len(fe_list)):
+        index = start + i
+        curr_node = curr_output_args[index]
+        _debug(f"582 - node is {curr_node}")
+        if curr_node is not None:
+            assert curr_node.name.startswith(
+                "wait"
+            ), f"Non comm gradient output tensor incorrectly handled...needs fix. {curr_output_args[start+i]}"
+            curr_output_args[start + i] = new_output_args[i]
+
+    _debug(f"577 - updated output args = {curr_output_args}\n")
 
     gm.graph.erase_node(output_node)
-    gm.graph.output(new_output_args)
+    gm.graph.output(curr_output_args)
 
 
 def _determine_peak_memory(gi: GraphInfo, fusion_policy: int) -> int:
@@ -634,7 +657,10 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
     for index, item in enumerate(gi.fe_list):
         count += 1
         if count == fusion_policy:
-            curr_fe_list = gi.fe_list[offset : offset + count]
+            start_index = offset
+            stop_index = offset + count
+
+            curr_fe_list = gi.fe_list[start_index:stop_index]
 
             _copy_fe_to_buffer(gi, gm, curr_fe_list)
 
@@ -643,7 +669,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> bool:
             # switch wait_comms to output gradient nodes in output directly
             # fusion will have removed and reworked existing wait_comms
             # TODO - this will break atm for dynamic fusion...rework for unlimited fusion case.
-            _finalize_output_node(gi, gm, fe_list)
+            _finalize_output_node(gi, gm, curr_fe_list, start_index, stop_index)
 
             offset += count
             count = 0
