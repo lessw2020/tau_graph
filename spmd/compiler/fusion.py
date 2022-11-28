@@ -39,13 +39,12 @@ class FusionElement:
     """This class tracks the nodes for a DTensor expanded communication collective in the graph"""
 
     in_graph: bool = False
-    comm_type: Optional[CommType] = None
-    node_list: Optional[List[fx.Node]] = field(default_factory=lambda: [])  # type: ignore
+    processed: bool = False
     size: int = 0
     shape: Optional[List[int]] = field(default_factory=lambda: [])  # type: ignore
+    comm_type: Optional[CommType] = None
+    node_list: Optional[List[fx.Node]] = field(default_factory=lambda: [])  # type: ignore
     prev_node: Optional[fx.Node] = None  # node that was before start of section
-    # next_node: Optional[fx.Node] = None  # node that was after end of section
-    processed: bool = False
     output_name: str = ""
     comm_node: Optional[fx.Node] = None
     wait_node: Optional[fx.Node] = None
@@ -54,9 +53,9 @@ class FusionElement:
     def _get_next_node(
         self,
     ):
-        """get the next node from the FE section"""
+        """get the next node after this FE section"""
         next_node = self.node_list[-1].next
-        _debug(f"57, next node name is {next_node.name}")
+        # _debug(f"57, next node name is {next_node.name}")
         assert (
             next_node is not None
         ), f"failed to get valid next node after {self.node_list[-1].name}"
@@ -76,6 +75,7 @@ class GraphInfo:
     peak_memory_required: int = 0
     global_buffer_node: Optional[fx.Node] = None
     global_buffer_size: int = 0
+    tracing_buffer: Optional[torch.Tensor] = None
     first: Optional[fx.Node] = None
     output: Optional[fx.Node] = None
 
@@ -236,7 +236,13 @@ def _copy_fe_to_buffer(
         return buffer
 
     # setup dummy vars
-    buffer = torch.empty(buffer_size)
+    buffer = None
+    if gi.tracing_buffer is None:
+        buffer = torch.empty(buffer_size)
+        gi.tracing_buffer = buffer
+    elif gi.tracing_buffer:
+        buffer = buffer = torch.empty(buffer_size)
+
     tlist = []
     for item in copy_list:
         a = torch.zeros((item.shape[0], item.shape[1]))
