@@ -53,7 +53,7 @@ class FusionElement:
     def _get_next_node(
         self,
     ):
-        """get the next node after this FE section"""
+        """get the next node after this FusionElement section"""
         next_node = self.node_list[-1].next
         # _debug(f"57, next node name is {next_node.name}")
         assert (
@@ -191,10 +191,10 @@ def _scan_graph_for_fusion_elements(
                 )
 
                 # need to fully populate this fe...
-                # we will be removing/rewriting the node list so we save prev and next
+                # we will be removing/rewriting the node list so we save prev
+                # to mark where this fe section starts
                 fe.prev_node = curr_node_list[0].prev
                 _debug(f"prev node = {fe.prev_node}")
-                fe.next_node = node.next
 
                 fe.output_name = node.name
                 fe.wait_node = node
