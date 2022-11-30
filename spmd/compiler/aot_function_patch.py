@@ -119,6 +119,7 @@ def patched_aot_function(
     # pyre-fixme
     def returned_function(*args, **kwargs):
         nonlocal cached_res
+        print(f"entered return function++++\n")
         # Now flatten the tensor args
         flat_args, _ = pytree.tree_flatten((args, kwargs))
 
@@ -139,7 +140,9 @@ def patched_aot_function(
                     tensor_args_spec,
                 )
                 tree_out = fn(*args, **kwargs)
+                # print(f"\n{tree_out=}\n")
                 flat_out, spec = pytree.tree_flatten(tree_out)
+                # print(f"\n{flat_out=}\n")
                 for i in flat_out:
                     is_known_type = False
                     for j in KNOWN_TYPES:

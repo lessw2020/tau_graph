@@ -25,6 +25,8 @@ from spmd.tensor import (
 from spmd.tensor import Placement, Replicate, Shard, _Partial
 from spmd.tensor import _redistribute_with_local_tensor
 
+from .fusion import run_comm_fusion
+
 from .graph_utils import OP
 from .log_utils import rank0_info
 from .aot_function_patch import patched_aot_function
@@ -393,6 +395,8 @@ def _convert_to_distributed(
 
     _rebuild_graph(gm, node_replacements)
 
+    # run_comm_fusion(gm)
+
     return make_boxed_func(gm), output_schemas
 
 
@@ -411,6 +415,8 @@ class SPMD(nn.Module):
 
         # TODO: coalesce broadcasts
         for p in module.parameters():
+            rank0_info(logger, f"418, p is {p.shape}")
+            rank0_info(logger, f"{schema=}")
             dist.broadcast(p, src=0)
 
         self._local_module: nn.Module = module
