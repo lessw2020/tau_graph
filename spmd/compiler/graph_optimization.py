@@ -5,6 +5,8 @@ from .bucketing_strategies import BucketingStrategy
 from .distributed_graph import DistributedGraph
 from .scheduling_policies import SchedulingPolicy
 
+from fusion import run_comm_fusion
+
 
 # It is more nature to set a run after list for a function decorator, but
 # it is easier to have check with run_before_set.
@@ -91,4 +93,6 @@ class DistGraphOptimization:
         bucketing_strategy: BucketingStrategy,
         scheduling_policy: SchedulingPolicy,
     ) -> "DistGraphOptimization":
+        print(f"\n94, fuse_comm in go entered!\n")
+
         return self
