@@ -92,6 +92,8 @@ class GraphInfo:
     first: Optional[fx.Node] = None
     # last node in graph (tail / output)
     output: Optional[fx.Node] = None
+    # offset to comm node within a FusionElement sequence
+    fe_offset_to_comm_node: Optional[int] = None
 
     def update_info(self, gm: fx.GraphModule) -> None:
         """Get the len, input and output nodes"""
@@ -164,6 +166,7 @@ def _insert_fusion_buffer_node(
 
 
 def _scan_graph_for_fusion_elements(
+    gi: GraphInfo,
     gm: fx.GraphModule,
     comm_type: CommType = CommType.allreduce,
 ) -> Optional[List[FusionElement]]:
@@ -183,8 +186,17 @@ def _scan_graph_for_fusion_elements(
         "wait_comm",
     ]
 
-    # this offset has to be kept updated if clone node is changed.
-    relative_comm_location_in_fe = 3
+    # depth to reach comm_node
+    if gi.fe_offset_to_comm_node is None:
+        for depth, item in enumerate(fe_sequence):
+            if isinstance(item, CommType):
+                gi.fe_offset_to_comm_node = depth
+                break
+    assert (
+        gi.fe_offset_to_comm_node is not None
+    ), f"Unable to locate comm node in {fe_sequence}."
+
+    offset_to_comm_node = gi.fe_offset_to_comm_node
 
     fe_size = len(fe_sequence) - 1
     index = 0
@@ -210,10 +222,12 @@ def _scan_graph_for_fusion_elements(
             if node.name.startswith(pattern):
                 curr_node_list.append(node)
 
-                fe = FusionElement(comm_type=comm_type)
+                fe = FusionElement(
+                    comm_type=comm_type, node_list=curr_node_list[:]
+                )
 
                 # move nodes into fe list. Important - do not deepcopy!
-                fe.node_list = [node for node in curr_node_list]
+                # fe.node_list = [node for node in curr_node_list]
 
                 # need to fully populate this fe...
                 # we will be removing/rewriting the node list so we save prev and next
@@ -222,7 +236,7 @@ def _scan_graph_for_fusion_elements(
 
                 fe.output_name = node.name
                 fe.wait_node = node
-                fe.comm_node = curr_node_list[relative_comm_location_in_fe]
+                fe.comm_node = curr_node_list[offset_to_comm_node]
 
                 fe.grad_tensor_node = fe.comm_node.args[0][0]  # type: ignore
 
@@ -613,6 +627,51 @@ def _determine_peak_memory(gi: GraphInfo, fusion_policy: int) -> int:
     return peak_memory
 
 
+def _find_source_node(gm: fx.GraphModule, fe: FusionElement) -> fx.Node:
+    """find source node for comm node"""
+    import copy
+
+    comm_node = fe.comm_node
+    first_source = comm_node.args[0][0]
+    _debug(f"first source for comm node {first_source.name}")
+    if first_source.name.startswith("clone"):
+
+        second_source = first_source.args[0]
+        _debug(f"second source for comm node {second_source.name}")
+        second_source_next = second_source.next
+        _debug(
+            f"642, second source next for comm node {second_source_next.name}"
+        )
+
+        # move the clone node
+        with gm.graph.inserting_before(second_source_next):
+            result_node = gm.graph.create_node(
+                first_source.op,
+                first_source.target,
+                first_source.args,
+                first_source.kwargs,
+                first_source.name,
+                first_source.type,
+            )
+            _debug(f"656, {result_node=}\n")
+            # result_node.meta = copy.copy(first_source.meta)
+            result_node.users = copy.deepcopy(first_source.users)
+            try:
+                replace_list = first_source.replace_all_uses_with(
+                    result_node, propagate_meta=True
+                )
+                # second_source.users = {}
+                _debug(f"662, {replace_list=}\n")
+                gm.graph.erase_node(first_source)
+            except RuntimeError:
+                _debug(f"660, failed to remove {first_source.name}")
+
+        _debug(f"--- after move 661, \n{gm.graph.print_tabular()}\n\n\n\n")
+        return second_source if second_source is not None else result_node
+
+    return first_source
+
+
 def run_comm_fusion(gm: fx.GraphModule) -> None:
     """Main entry into remapping graph for all_reduce fusion.
     Modifications are in place to the graph.  Errors will result in stoppage
@@ -628,12 +687,26 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
     _debug(f"\n Start of fusion pass graph {gm.graph.print_tabular()}\n")
 
     # scan graph for all comm sections (fusion elements)
-    fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
+    fe_list = _scan_graph_for_fusion_elements(
+        graph_info, gm, comm_type=CommType.allreduce
+    )
 
     # --------- check if all graph working for next -----------
     _debug(f"{graph_info.graph_id=}")
 
     _debug(f"length of fe_list {len(fe_list)}")
+
+    # --move clone node up
+    for item in reversed(fe_list):
+        source_node = _find_source_node(gm, item)
+        if source_node is None:
+            _debug(f"None node - from {item.comm_node=}")
+        _debug(
+            f"650, source node for {item.comm_node.name} is {source_node.name}\n"
+        )
+        break
+
+    # _debug(f"\n after clone move {gm.graph.print_tabular()}\n")
 
     # for node in gm.graph.nodes:
     #    _debug(f"{node.name}, {id(node.graph)}, {graph_info.graph_id}")
@@ -673,7 +746,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
     _debug(f"{graph_info.output.name=}")
     # ----------- main fusion loop ------------------------
 
-    for index, item in enumerate(graph_info.fe_list):  # type: ignore
+    """for index, item in enumerate(graph_info.fe_list):  # type: ignore
         count += 1
         if count == fusion_policy:
             start_index = offset
@@ -707,6 +780,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
     _debug(f"631, processed {index+1} fe items")
 
     _debug(f"656, updated output node args {new_output_args=}\n")
+    """
 
     _debug(f"670, final graph = {gm.graph.print_tabular()}\n")
 
