@@ -267,7 +267,7 @@ def _copy_fe_to_buffer(
     if gi.tracing_buffer is None:
         buffer = torch.empty(buffer_size)
         gi.tracing_buffer = buffer
-    elif gi.tracing_buffer:
+    elif gi.tracing_buffer is not None:
         buffer = gi.tracing_buffer
 
     tlist = []
@@ -444,7 +444,7 @@ def _scatter_results_from_buffer(
     insert_graph = id(insert_node.graph)
     curr_graph = gi.graph_id
     assert (
-        curr_graph is insert_graph
+        curr_graph == insert_graph
     ), f"mismatch between insert node graph and main graph, {insert_node=}, {curr_graph=}, {insert_graph=}\n"
 
     with gm.graph.inserting_before(insert_node):
