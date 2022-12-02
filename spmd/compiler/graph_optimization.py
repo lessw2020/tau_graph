@@ -108,4 +108,5 @@ class DistGraphOptimization:
         bwd_graph = self.bwd_graph_modules[0]
         # _debug(f"\n About to fuse! {bwd_graph.graph}\n")
         _debug(f"call run fusion next\n")
+        run_comm_fusion(bwd_graph)
         return self

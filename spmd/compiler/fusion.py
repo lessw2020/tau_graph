@@ -55,6 +55,9 @@ class FusionElement:
     ) -> fx.Node:
         """Get the next node after this FE section"""
         next_node = self.node_list[-1].next  # type: ignore
+        _debug(
+            f"58, next_node retrieved is {next_node.name}, graph = {id(next_node.graph)}\n"
+        )
 
         assert (
             next_node is not None
@@ -69,6 +72,8 @@ class GraphInfo:
     the location and size of the global buffer node
     """
 
+    # graph id
+    graph_id: int = 0
     # starting len of the graph
     len: int = 0
     # total count of initial fusion elements
@@ -94,6 +99,9 @@ class GraphInfo:
         if not graph_len:
             raise ValueError("Empty graph passed in....")
         self.len = graph_len
+
+        # store graph id
+        self.graph_id = id(gm.graph)
 
         nodelist = gm.graph.nodes
 
@@ -165,7 +173,7 @@ def _scan_graph_for_fusion_elements(
     element_list = []
 
     fe_sequence = [
-        # "clone",
+        "clone",
         "_tensor_constant",
         "_tensor_constant",
         comm_type,
@@ -175,9 +183,14 @@ def _scan_graph_for_fusion_elements(
         "wait_comm",
     ]
 
+    # this offset has to be kept updated if clone node is changed.
+    relative_comm_location_in_fe = 3
+
     fe_size = len(fe_sequence) - 1
     index = 0
     curr_node_list = []
+
+    curr_graph_id = id(gm.graph)
 
     for i, node in enumerate(gm.graph.nodes):
         pattern = fe_sequence[index]
@@ -185,6 +198,9 @@ def _scan_graph_for_fusion_elements(
         if index < fe_size:
             if node.name.startswith(pattern):
                 curr_node_list.append(node)
+                _debug(
+                    f"202, append id = {id(curr_node_list[-1].graph)}, vs {curr_graph_id} "
+                )
                 index += 1
                 continue
             else:
@@ -198,8 +214,10 @@ def _scan_graph_for_fusion_elements(
                 curr_node_list.append(node)
 
                 fe = FusionElement(
-                    comm_type=comm_type, node_list=deepcopy(curr_node_list)
+                    comm_type=comm_type  # , node_list=(curr_node_list)
                 )
+
+                fe.node_list = [node for node in curr_node_list]
 
                 # need to fully populate this fe...
                 # we will be removing/rewriting the node list so we save prev and next
@@ -208,7 +226,7 @@ def _scan_graph_for_fusion_elements(
 
                 fe.output_name = node.name
                 fe.wait_node = node
-                fe.comm_node = curr_node_list[2]
+                fe.comm_node = curr_node_list[relative_comm_location_in_fe]
 
                 fe.grad_tensor_node = fe.comm_node.args[0][0]  # type: ignore
 
@@ -254,7 +272,8 @@ def _copy_fe_to_buffer(
 
     tlist = []
     for item in copy_list:
-        a = torch.zeros_like(item)  # type: ignore
+        _debug(f"260 {item=}")
+        a = torch.zeros(item.shape)  # type: ignore
         tlist.append(a)
 
     load_gm = make_fx(copy_to_buffer)(buffer, tlist)
@@ -279,6 +298,9 @@ def _copy_fe_to_buffer(
         pl_map[pl_list[i + 1]] = copy_list[i].grad_tensor_node  # type: ignore
 
     insert_node = copy_list[-1].comm_node
+    _debug(
+        f"294, insert node for copy into buffer {insert_node}, graph = {id(insert_node.graph)}, main graph {gi.graph_id}"
+    )
     value_remap: Dict[fx.Node, fx.Node] = {}
 
     def remap_copy_args(in_node: fx.Node) -> fx.Node:
@@ -306,6 +328,9 @@ def _copy_fe_to_buffer(
 
     buffer_comm_node = copy_list[-1].comm_node
     buffer_comm_node.update_arg(0, [buffer_node])  # type: ignore
+    _debug(
+        f"324, buffer comm node graph {id(buffer_comm_node.graph)}, {gi.graph_id}"
+    )
 
 
 def _build_buffer_comm_graph(
@@ -348,6 +373,13 @@ def _scatter_results_from_buffer(
     buffer_node = gi.global_buffer_node
     buffer_size = gi.global_buffer_size
 
+    buffer_node_graph = id(buffer_node.graph)
+    assert (
+        buffer_node_graph == gi.graph_id
+    ), f"graph mismatch, {buffer_node_graph=}, {gi.graph_id=}"
+
+    _debug(f"{buffer_node_graph=}, {gi.graph_id=}")
+
     scatter_list = fe_list
     num_fe_items = len(scatter_list)
 
@@ -383,7 +415,12 @@ def _scatter_results_from_buffer(
             pl_list.append(node)
 
     #
-    insert_node = fe_list[-1]._get_next_node()  # before last node of FE section
+
+    insert_node = fe_list[-1]._get_next_node()  # after last node of FE section
+    # TODO - for some reason, get next to output node returns non graph output node?
+    # for now, safety check and replace
+    if insert_node.name.startswith("output"):
+        insert_node = gi.output
 
     # create placeholder remapping
     pl_map: Dict[fx.Node, fx.Node] = {}
@@ -403,6 +440,12 @@ def _scatter_results_from_buffer(
 
         update_node_user_count[out_node] = ""
         return out_node
+
+    insert_graph = id(insert_node.graph)
+    curr_graph = gi.graph_id
+    assert (
+        curr_graph is insert_graph
+    ), f"mismatch between insert node graph and main graph, {insert_node=}, {curr_graph=}, {insert_graph=}\n"
 
     with gm.graph.inserting_before(insert_node):
         for innernode in scatter_sg.graph.nodes:
@@ -591,6 +634,24 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
     # scan graph for all comm sections (fusion elements)
     fe_list = _scan_graph_for_fusion_elements(gm, comm_type=CommType.allreduce)
 
+    # --------- check if all graph working for next -----------
+    _debug(f"{graph_info.graph_id=}")
+
+    _debug(f"length of fe_list {len(fe_list)}")
+
+    for node in gm.graph.nodes:
+        _debug(f"{node.name}, {id(node.graph)}, {graph_info.graph_id}")
+
+    curr_graph_id = graph_info.graph_id
+
+    for item in fe_list:
+        _debug(f" ---- innner list, {item.wait_node.name} --------")
+        for subitem in item.node_list:
+
+            _debug(
+                f"{subitem.name}, {id(subitem.graph)}, {graph_info.graph_id}"
+            )
+
     graph_info.num_starting_fe = len(fe_list)  # type: ignore
     graph_info.fe_list = fe_list
 
@@ -613,6 +674,7 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
     start_output_args: List[fx.Node] = graph_info.output.args[0]  # type: ignore
     new_output_args: List[fx.Node] = list(start_output_args)  # type: ignore
 
+    _debug(f"{graph_info.output.name=}")
     # ----------- main fusion loop ------------------------
 
     for index, item in enumerate(graph_info.fe_list):  # type: ignore
@@ -644,12 +706,17 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
     # update output with the updated args
     gm.graph.erase_node(graph_info.output)
     gm.graph.output(new_output_args)
+    _debug(f"{graph_info.output.name=}")
 
     _debug(f"631, processed {index+1} fe items")
 
     _debug(f"656, updated output node args {new_output_args=}\n")
 
+    _debug(f"670, final graph = {gm.graph.print_tabular()}\n")
+
     # final review print
     graph_cleanup(gm)
+
+    _debug(f"675, final final graph = {gm.graph.print_tabular()}\n")
 
     gm.recompile()
