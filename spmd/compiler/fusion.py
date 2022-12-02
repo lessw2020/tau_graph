@@ -198,9 +198,6 @@ def _scan_graph_for_fusion_elements(
         if index < fe_size:
             if node.name.startswith(pattern):
                 curr_node_list.append(node)
-                _debug(
-                    f"202, append id = {id(curr_node_list[-1].graph)}, vs {curr_graph_id} "
-                )
                 index += 1
                 continue
             else:
@@ -213,10 +210,9 @@ def _scan_graph_for_fusion_elements(
             if node.name.startswith(pattern):
                 curr_node_list.append(node)
 
-                fe = FusionElement(
-                    comm_type=comm_type  # , node_list=(curr_node_list)
-                )
+                fe = FusionElement(comm_type=comm_type)
 
+                # move nodes into fe list. Important - do not deepcopy!
                 fe.node_list = [node for node in curr_node_list]
 
                 # need to fully populate this fe...
@@ -272,7 +268,7 @@ def _copy_fe_to_buffer(
 
     tlist = []
     for item in copy_list:
-        _debug(f"260 {item=}")
+        # _debug(f"260 {item=}")
         a = torch.zeros(item.shape)  # type: ignore
         tlist.append(a)
 
@@ -378,7 +374,7 @@ def _scatter_results_from_buffer(
         buffer_node_graph == gi.graph_id
     ), f"graph mismatch, {buffer_node_graph=}, {gi.graph_id=}"
 
-    _debug(f"{buffer_node_graph=}, {gi.graph_id=}")
+    # _debug(f"{buffer_node_graph=}, {gi.graph_id=}")
 
     scatter_list = fe_list
     num_fe_items = len(scatter_list)
@@ -639,19 +635,19 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
 
     _debug(f"length of fe_list {len(fe_list)}")
 
-    for node in gm.graph.nodes:
-        _debug(f"{node.name}, {id(node.graph)}, {graph_info.graph_id}")
+    # for node in gm.graph.nodes:
+    #    _debug(f"{node.name}, {id(node.graph)}, {graph_info.graph_id}")
 
     curr_graph_id = graph_info.graph_id
 
-    for item in fe_list:
+    """for item in fe_list:
         _debug(f" ---- innner list, {item.wait_node.name} --------")
         for subitem in item.node_list:
 
             _debug(
                 f"{subitem.name}, {id(subitem.graph)}, {graph_info.graph_id}"
             )
-
+    """
     graph_info.num_starting_fe = len(fe_list)  # type: ignore
     graph_info.fe_list = fe_list
 
