@@ -135,6 +135,7 @@ def work_main(rank: int, world_size: int) -> None:
             ),
             placements=[Replicate()],
         ),
+        run_fusion=True,
     )
 
     # model input - need to adjust to match models

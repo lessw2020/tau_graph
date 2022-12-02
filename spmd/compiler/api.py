@@ -10,6 +10,14 @@ from .distributed_graph import DistributedGraph
 from .graph_optimization import DistGraphOptimization
 from .scheduling_policies import SchedulingPolicy
 
+import logging
+from .log_utils import rank0_debug
+from .fusion import run_comm_fusion
+from functools import partial
+
+logger: logging.Logger = logging.getLogger(__name__)
+_debug = partial(rank0_debug, logger)  # type: ignore
+
 
 class SPMD(nn.Module):
     # TODO: add schema_override
@@ -18,7 +26,8 @@ class SPMD(nn.Module):
         module: nn.Module,
         schema: Schema,
         input_schemas: Sequence[Placement] = tuple(),
-        optimize_first_iter: bool = False,
+        optimize_first_iter: bool = True,
+        run_fusion: bool = True,
     ) -> None:
         super().__init__()
         assert schema.placements == [
@@ -36,6 +45,7 @@ class SPMD(nn.Module):
         self._dist_graph = DistributedGraph(orig_module=module)
         self._graph_optimization = DistGraphOptimization(self._dist_graph)
         self._optimize_first_iter = optimize_first_iter
+        self._run_fusion = run_fusion
 
     def forward(
         self, *args: Tuple[object], **kwargs: Dict[str, object]
@@ -47,22 +57,36 @@ class SPMD(nn.Module):
                 self._input_schemas,
                 self._optimize_first_iter,
                 *args,
-                **kwargs
+                **kwargs,
             )
 
+        _debug(
+            f"\n64 api - len bwd modules {len(self._dist_graph.bwd_graph_modules)}\n"
+        )
+
+        if self._run_fusion:
+            _debug(f"62, running fusion...\n")
+            self._graph_optimization.fuse_communication(
+                BucketingStrategy.FIXED, SchedulingPolicy.FCFS
+            )
+        else:
+            _debug(f"67, fusion not run")
+
         if (
-            not self._graph_optimization.optimized
-            and self._dist_graph.bwd_graph_modules
+            False  # TODO -remove
+            # not self._graph_optimization.optimized
+            # and self._dist_graph.bwd_graph_modules
         ):
             # Profile the module. Right now it will use the saved orig_module
             # to profile. There will be another compilation for the profiling
             # purpose.
-            self._dist_graph.profile(*args, **kwargs)
+            # TODO - turn on when ready
+            # self._dist_graph.profile(*args, **kwargs)
 
             # Apply the graph optimizations if the graph is not optimized both
             # fwd and bwd graphs are ready. All optimizations should be directly
             # applied to the saved fwd and bwd gm.
-            self._dist_graph.update()
+            # self._dist_graph.update()
             self._graph_optimization.fuse_communication(
                 BucketingStrategy.FIXED, SchedulingPolicy.FCFS
             )

@@ -380,6 +380,57 @@ class TraceModuleTest(DTensorTestBase):
                 or p1.grad.allclose(p2.grad)
             )
 
+    @with_comms
+    def test_fusion(self):
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.module_list = nn.ModuleList(
+                    [nn.Linear(10, 10) for _ in range(2)]
+                )
+
+            def forward(self, x):
+                return sum([m(x) for m in self.module_list])
+
+        # create two versions, one will be fused, one will not
+        base_model = Model().to(self.device_type)
+
+        nofusion = SPMD(
+            deepcopy(base_model),
+            schema=Schema(
+                mesh=DeviceMesh(
+                    self.device_type, torch.arange(self.world_size)
+                ),
+                placements=[Replicate()],
+            ),
+        )
+        # TODO - flag for enforcing fusion
+        fused = SPMD(
+            deepcopy(base_model),
+            schema=Schema(
+                mesh=DeviceMesh(
+                    self.device_type, torch.arange(self.world_size)
+                ),
+                placements=[Replicate()],
+            ),
+        )
+        input = torch.randn(2, 10).to(self.device_type)
+
+        nofusion(input).sum().backward()
+        fused(input).sum().backward()
+
+        for p1, p2 in zip(nofusion.parameters(), fused.parameters()):
+            # DDP divides gradients by world size to compute average, but
+            # _Partial tensor shouldn't do that automatically. Hence explicitly
+            # do division here.
+            self.assertTrue(
+                p1.grad.allclose(p2.grad / self.world_size)
+                or p1.grad.allclose(p2.grad)
+            )
+
+        # TODO - would like to check graph for count of all_reduce,
+        # but need to pass back graph in unit test...
+
 
 if __name__ == "__main__":
     run_tests()

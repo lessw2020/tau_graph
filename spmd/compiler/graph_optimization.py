@@ -5,7 +5,15 @@ from .bucketing_strategies import BucketingStrategy
 from .distributed_graph import DistributedGraph
 from .scheduling_policies import SchedulingPolicy
 
-from fusion import run_comm_fusion
+from .fusion import run_comm_fusion
+
+import logging
+from .log_utils import rank0_debug
+from .fusion import run_comm_fusion
+from functools import partial
+
+logger: logging.Logger = logging.getLogger(__name__)
+_debug = partial(rank0_debug, logger)  # type: ignore
 
 
 # It is more nature to set a run after list for a function decorator, but
@@ -93,6 +101,11 @@ class DistGraphOptimization:
         bucketing_strategy: BucketingStrategy,
         scheduling_policy: SchedulingPolicy,
     ) -> "DistGraphOptimization":
-        print(f"\n94, fuse_comm in go entered!\n")
-
+        _debug(f"\n94, fuse_comm in go entered! ************\n")
+        _debug(f"type of self {type(self)}\n")
+        # _debug(f"{self.bwd_graph_modules=}")
+        assert len(self.bwd_graph_modules), f"no bwd  graph ready"
+        bwd_graph = self.bwd_graph_modules[0]
+        # _debug(f"\n About to fuse! {bwd_graph.graph}\n")
+        _debug(f"call run fusion next\n")
         return self

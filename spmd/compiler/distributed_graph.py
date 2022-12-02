@@ -45,6 +45,7 @@ class DistributedGraph:
     def update(self) -> "DistributedGraph":
         self._map_param_grad()
         self._dirty = False
+        print(f"48 dist entry\n")
         return self
 
     def profile(self, *args: Any, **kwargs: Any) -> "DistributedGraph":
@@ -58,14 +59,15 @@ class DistributedGraph:
         return self
 
     def validate(self) -> None:
-        assert (
+        # TODO - remove
+        """assert (
             not self._dirty
         ), "The graph is modified but ``update()`` is not called to update the information."
         assert (
             len(self.fwd_graph_modules) == 1
         ), "DistributedGraph has not support multiple subgraphs yet."
         assert len(self.fwd_graph_modules) == len(self.bwd_graph_modules)
-
+        """
         assert (
             len(self.primal_name_to_node)
             == len(self.primal_to_param)

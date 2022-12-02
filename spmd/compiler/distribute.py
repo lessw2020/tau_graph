@@ -31,7 +31,13 @@ from .aot_function_patch import patched_aot_function
 from .distributed_graph import DistributedGraph
 from .graph_utils import OP
 from .log_utils import rank0_info
+import logging
+from .log_utils import rank0_debug
+from .fusion import run_comm_fusion
+from functools import partial
 
+logger: logging.Logger = logging.getLogger(__name__)
+_debug = partial(rank0_debug, logger)  # type: ignore
 
 # patch aot_function so that we can pass the full (non-sharded) input to capture the graph
 # pyre-fixme
@@ -487,6 +493,8 @@ class _SPMD:
             self._dist_graph.fwd_graph_modules.append(parallelized_gm)
         elif training_phase == TrainingPhase.BACKWARD:
             self._dist_graph.bwd_graph_modules.append(parallelized_gm)
+            _debug(f"self type = {type(self)}\n")
+            _debug(f"len {len(self._dist_graph.bwd_graph_modules)}")
         return make_boxed_func(parallelized_gm)
 
 
