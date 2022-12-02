@@ -1,5 +1,5 @@
 import logging
-from copy import deepcopy
+import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
@@ -627,9 +627,41 @@ def _determine_peak_memory(gi: GraphInfo, fusion_policy: int) -> int:
     return peak_memory
 
 
+def move_node(
+    gm: fx.GraphModule, insert_location_node: fx.Node, node_to_move: fx.Node
+) -> fx.Node:
+    """move a node in the current graph and delete the original.
+    returns new moved node
+    """
+    # move the  node
+    with gm.graph.inserting_before(insert_location_node):
+        result_node = gm.graph.create_node(
+            node_to_move.op,
+            node_to_move.target,
+            node_to_move.args,
+            node_to_move.kwargs,
+            node_to_move.name,
+            node_to_move.type,
+        )
+
+    # result_node.meta = copy.copy(first_source.meta)
+    result_node.users = copy.deepcopy(node_to_move.users)
+    try:
+        replace_list = node_to_move.replace_all_uses_with(
+            result_node, propagate_meta=True
+        )
+        # second_source.users = {}
+        _debug(f"662, {replace_list=}\n")
+        gm.graph.erase_node(node_to_move)
+    except RuntimeError:
+        _debug(f"654, failed to remove {node_to_move.name}")
+        return None
+    _debug(f"659, {result_node=}\n")
+    return result_node
+
+
 def _find_source_node(gm: fx.GraphModule, fe: FusionElement) -> fx.Node:
     """find source node for comm node"""
-    import copy
 
     comm_node = fe.comm_node
     first_source = comm_node.args[0][0]
@@ -644,56 +676,22 @@ def _find_source_node(gm: fx.GraphModule, fe: FusionElement) -> fx.Node:
         )
 
         # move the clone node
-        with gm.graph.inserting_before(second_source_next):
-            result_node = gm.graph.create_node(
-                first_source.op,
-                first_source.target,
-                first_source.args,
-                first_source.kwargs,
-                first_source.name,
-                first_source.type,
-            )
-            _debug(f"656, {result_node=}\n")
-            # result_node.meta = copy.copy(first_source.meta)
-            result_node.users = copy.deepcopy(first_source.users)
-            try:
-                replace_list = first_source.replace_all_uses_with(
-                    result_node, propagate_meta=True
-                )
-                # second_source.users = {}
-                _debug(f"662, {replace_list=}\n")
-                gm.graph.erase_node(first_source)
-            except RuntimeError:
-                _debug(f"660, failed to remove {first_source.name}")
+        insert_before_node = second_source_next
+        nodes_to_move = fe.node_list[0:4]
+        _debug(f"681, {nodes_to_move=}")
+        assert nodes_to_move[3] == fe.comm_node, f"mismatch in nodes for moving"
 
         tc1 = fe.node_list[1]
         tc2 = fe.node_list[2]
         allreduce = fe.comm_node
         _debug(f"672, {tc1.name}, {tc2.name}, {allreduce.name}\n")
 
-        to_move_list = [tc1, tc2, allreduce]
-        for item in to_move_list:
-            with gm.graph.inserting_before(second_source_next):
-                result_node = gm.graph.create_node(
-                    item.op,
-                    item.target,
-                    item.args,
-                    item.kwargs,
-                    item.name,
-                    item.type,
-                )
-            _debug(f"656, {result_node=}\n")
-            # result_node.meta = copy.copy(first_source.meta)
-            result_node.users = copy.deepcopy(first_source.users)
-            try:
-                replace_list = item.replace_all_uses_with(
-                    result_node, propagate_meta=True
-                )
-                # second_source.users = {}
-                _debug(f"662, {replace_list=}\n")
-                gm.graph.erase_node(item)
-            except RuntimeError:
-                _debug(f"660, failed to remove {item.name}")
+        result_nodes = []
+
+        for to_move in nodes_to_move:
+            result = move_node(gm, insert_before_node, to_move)
+            result_nodes.append(result)
+            _debug(f"693, moved {to_move.name}")
 
         _debug(f"--- after move x4, 699, \n{gm.graph.print_tabular()}\n\n\n\n")
         return second_source if second_source is not None else result_node
