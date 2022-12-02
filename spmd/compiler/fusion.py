@@ -666,7 +666,36 @@ def _find_source_node(gm: fx.GraphModule, fe: FusionElement) -> fx.Node:
             except RuntimeError:
                 _debug(f"660, failed to remove {first_source.name}")
 
-        _debug(f"--- after move 661, \n{gm.graph.print_tabular()}\n\n\n\n")
+        tc1 = fe.node_list[1]
+        tc2 = fe.node_list[2]
+        allreduce = fe.comm_node
+        _debug(f"672, {tc1.name}, {tc2.name}, {allreduce.name}\n")
+
+        to_move_list = [tc1, tc2, allreduce]
+        for item in to_move_list:
+            with gm.graph.inserting_before(second_source_next):
+                result_node = gm.graph.create_node(
+                    item.op,
+                    item.target,
+                    item.args,
+                    item.kwargs,
+                    item.name,
+                    item.type,
+                )
+            _debug(f"656, {result_node=}\n")
+            # result_node.meta = copy.copy(first_source.meta)
+            result_node.users = copy.deepcopy(first_source.users)
+            try:
+                replace_list = item.replace_all_uses_with(
+                    result_node, propagate_meta=True
+                )
+                # second_source.users = {}
+                _debug(f"662, {replace_list=}\n")
+                gm.graph.erase_node(item)
+            except RuntimeError:
+                _debug(f"660, failed to remove {item.name}")
+
+        _debug(f"--- after move x4, 699, \n{gm.graph.print_tabular()}\n\n\n\n")
         return second_source if second_source is not None else result_node
 
     return first_source
