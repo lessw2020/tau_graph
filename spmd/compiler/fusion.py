@@ -634,6 +634,7 @@ def move_node(
     returns new moved node
     """
     # move the  node
+    _debug(f"637, prep to move node {node_to_move}")
     with gm.graph.inserting_before(insert_location_node):
         result_node = gm.graph.create_node(
             node_to_move.op,
@@ -643,27 +644,71 @@ def move_node(
             node_to_move.name,
             node_to_move.type,
         )
+    _debug(f"647 - moved {node_to_move.name} to {result_node.name}")
 
-    # result_node.meta = copy.copy(first_source.meta)
-    result_node.users = copy.deepcopy(node_to_move.users)
-    try:
-        replace_list = node_to_move.replace_all_uses_with(
-            result_node, propagate_meta=True
-        )
-        # second_source.users = {}
-        _debug(f"662, {replace_list=}\n")
+    result_node.meta = copy.copy(node_to_move.meta)
+    # result_node.users = copy.deepcopy(node_to_move.users)
+
+    # replace_list = node_to_move.replace_all_uses_with(
+    #     result_node, propagate_meta=True
+    # )
+    node_to_move.users = {}
+    # _debug(f"662, {replace_list=} for {node_to_move}\n")
+
+    """try:
         gm.graph.erase_node(node_to_move)
     except RuntimeError:
         _debug(f"654, failed to remove {node_to_move.name}")
-        return None
+        # return None
+    """
     _debug(f"659, {result_node=}\n")
+
     return result_node
 
 
-def _find_source_node(gm: fx.GraphModule, fe: FusionElement) -> fx.Node:
+def append_node(gm, insert_location, node_to_insert):
+    pass
+
+
+def get_source_node(comm_node: fx.Node):
+
+    curr_source = comm_node.args[0][0]
+
+    # if clone, find clone source
+    if curr_source.name.startswith("clone"):
+        _debug(f"679, clone source args {curr_source.args=}")
+        clone_source = curr_source.args[0]
+        curr_source = clone_source
+
+    _debug(
+        f"682, found source node {curr_source.name} for comm_node {comm_node.name}"
+    )
+
+    prepend_node = curr_source.next
+    assert (
+        prepend_node is not None
+    ), f"failed to get next from {curr_source.name}"
+
+    _debug(f"686, prepend node = {prepend_node.name} for {comm_node.name}")
+
+    return prepend_node
+
+
+def _move_comm_section(
+    gm: fx.GraphModule, fe: FusionElement
+) -> Optional[List[fx.Node]]:
     """find source node for comm node"""
 
-    comm_node = fe.comm_node
+    prepend_node = get_source_node(fe.comm_node)
+    nodes_to_move = fe.node_list[0:4]
+    for item in nodes_to_move:
+        prepend_node.prepend(item)
+
+    _debug(f"706, {gm.graph.print_tabular()}\n")
+
+    return nodes_to_move
+
+    """comm_node = fe.comm_node
     first_source = comm_node.args[0][0]
     _debug(f"first source for comm node {first_source.name}")
     if first_source.name.startswith("clone"):
@@ -681,22 +726,46 @@ def _find_source_node(gm: fx.GraphModule, fe: FusionElement) -> fx.Node:
         _debug(f"681, {nodes_to_move=}")
         assert nodes_to_move[3] == fe.comm_node, f"mismatch in nodes for moving"
 
+        # todo remove
         tc1 = fe.node_list[1]
         tc2 = fe.node_list[2]
         allreduce = fe.comm_node
         _debug(f"672, {tc1.name}, {tc2.name}, {allreduce.name}\n")
 
         result_nodes = []
+        new_clone_node = None
 
-        for to_move in nodes_to_move:
+        for i, to_move in enumerate(nodes_to_move):
+            # have to remap clone nodes
+            if i == 3:
+                # remap all_reduce
+                new_args = (
+                    [result_nodes[0]],
+                    result_nodes[1],
+                    result_nodes[2],
+                    -1,
+                )
+                _debug(f"new allr args = {new_args}")
+                to_move.args = new_args
+                _debug(f"705, allreduce remap {to_move.args=}")
+
             result = move_node(gm, insert_before_node, to_move)
+            if i == 0:
+                new_clone_node = result
+                _debug(f"706, {new_clone_node.name} from {to_move.name}\n")
             result_nodes.append(result)
-            _debug(f"693, moved {to_move.name}")
+            _debug(f"693, moved {to_move.name} to {result.name}")
+            # update graph monitor
+            fe.node_list[i] = result_nodes[i]
+        # update wait_comm node
+        fe.wait_node.update_arg(0, result_nodes[-1])
+        _debug(f"724, {fe.wait_node.args=}")
 
         _debug(f"--- after move x4, 699, \n{gm.graph.print_tabular()}\n\n\n\n")
-        return second_source if second_source is not None else result_node
+        return second_source if second_source is not None else result_nodes
 
     return first_source
+    """
 
 
 def run_comm_fusion(gm: fx.GraphModule) -> None:
@@ -723,16 +792,15 @@ def run_comm_fusion(gm: fx.GraphModule) -> None:
 
     _debug(f"length of fe_list {len(fe_list)}")
 
-    # --move clone node up
-    for item in reversed(fe_list):
-        source_node = _find_source_node(gm, item)
-        if source_node is None:
-            _debug(f"None node - from {item.comm_node=}")
-        _debug(
-            f"650, source node for {item.comm_node.name} is {source_node.name}\n"
-        )
-        break
+    # -- distribute for initial overlap
+    for i, item in enumerate(fe_list[1:]):
+        source_node = _move_comm_section(gm, item)
+        # gm.recompile()
 
+    gm.recompile()
+    _debug(
+        f"800,\n {gm.graph.print_tabular()}\n==================================="
+    )
     # _debug(f"\n after clone move {gm.graph.print_tabular()}\n")
 
     # for node in gm.graph.nodes:
