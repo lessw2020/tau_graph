@@ -62,6 +62,16 @@ class FusionElement:
 
 
 @dataclass
+class FusionCluster:
+    """Class tracks FusionElements that have been fused together for easier movement and handling"""
+
+    fe_list: List[FusionElement] = field(default_factory=lambda: [])
+    upper_start_node: Optional[fx.Node] = None
+    lower_start_node: Optional[fx.Node] = None
+    cluster_size: int = 0
+
+
+@dataclass
 class GraphInfo:
     """Provides a home for global aspects of this graph.
     Currently tracks first and last node, len of the graph and
@@ -260,12 +270,12 @@ def _copy_fe_to_buffer(
     if gi.tracing_buffer is None:
         buffer = torch.empty(buffer_size)
         gi.tracing_buffer = buffer
-    elif gi.tracing_buffer:
+    else:
         buffer = gi.tracing_buffer
 
     tlist = []
     for item in copy_list:
-        a = torch.zeros_like(item)  # type: ignore
+        a = torch.zeros(item.shape)  # type: ignore
         tlist.append(a)
 
     load_gm = make_fx(copy_to_buffer)(buffer, tlist)
