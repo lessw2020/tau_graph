@@ -2,7 +2,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -40,7 +40,7 @@ class FusionElement:
     # has gone through the fusion policy process
     processed: bool = False
     size: Optional[int] = 0
-    shape: Optional[Tuple[int, int]] = field(default_factory=lambda: [])  # type: ignore
+    shape: Optional[torch.Size] = None
     comm_type: Optional[CommType] = None
     node_list: Optional[List[fx.Node]] = field(default_factory=lambda: [])  # type: ignore
     prev_node: Optional[fx.Node] = None  # node that was before start of section
@@ -63,12 +63,13 @@ class FusionElement:
 
 @dataclass
 class FusionCluster:
+
     """Class tracks FusionElements that have been fused together for easier movement and handling"""
 
     fe_list: List[FusionElement] = field(default_factory=lambda: [])
     upper_start_node: Optional[fx.Node] = None
     lower_start_node: Optional[fx.Node] = None
-    cluster_size: int = 0
+    size: int = 0
 
 
 @dataclass
@@ -84,6 +85,7 @@ class GraphInfo:
     num_starting_fe: int = 0
     # list of all FusionElements in the graph
     fe_list: Optional[Iterable[FusionElement]] = None  # type: ignore
+    cluster_list: Optional[Iterable[FusionCluster]] = None
     # max memory needed for fusion buffer
     peak_memory_required: int = 0
     # node housing global buffer for fusion comms
@@ -616,6 +618,43 @@ def _teardown(gm: fx.GraphModule) -> None:
     _debug("605, final graph cleanup, ready to exit\n")
 
 
+def _build_clusters_with_policy(
+    gi: GraphInfo, gm: fx.GraphModule, bucket_size: 200
+) -> List[FusionCluster]:
+    """walk the fe list to assemble clusters that hold fe's matching the desired bucket size"""
+    # reset cluster list
+    gi.cluster_list = []
+
+    total_cluster_size = 0
+    curr_cluster = FusionCluster()
+    in_progress: bool = False
+
+    for i, item in enumerate(gi.fe_list):
+        total_cluster_size += item.size
+        curr_cluster.fe_list.append(item)
+        in_progress = True
+
+        if total_cluster_size >= bucket_size:
+            # need to save this cluster
+            gi.cluster_list.append(curr_cluster)
+            curr_cluster.size = total_cluster_size
+            in_progress = False
+
+            # and start new cluster
+            curr_cluster = FusionCluster()
+            total_cluster_size = 0
+
+    # handle remaining items unless they all fit perfectly
+    if in_progress:
+        gi.cluster_list.append(curr_cluster)
+        curr_cluster.size = total_cluster_size
+
+    results = []
+    for i, item in enumerate(gi.cluster_list):
+        _debug(f"item {i} in cluster has {item.size} ")
+    _debug(f"\n**********************************************************\n")
+
+
 def run_fuse_communication(gm: fx.GraphModule) -> None:
     """Main entry into remapping graph for all_reduce fusion.
     Modifications are in place to the graph.  Errors will result in stoppage
@@ -636,6 +675,9 @@ def run_fuse_communication(gm: fx.GraphModule) -> None:
     # simple fusion policy where int = num buckets to fuse...start with 2,
     # meaning every 2 comms are fused into 1
     fusion_policy: int = 2
+
+    # cluster based on bucket size
+    _build_clusters_with_policy(graph_info, gm, 810)
 
     # determine peak memory using fusion policy
     peak_memory_required = _determine_peak_memory(graph_info, fusion_policy)
