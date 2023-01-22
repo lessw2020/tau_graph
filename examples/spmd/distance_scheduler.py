@@ -578,8 +578,14 @@ class Scheduler:
     @dynamo_timed
     def __init__(self, nodes):
         super(Scheduler, self).__init__()
-        self.backends = {}
         global _is_fwd
+
+        self._fwd_distance_policy = 0
+        self._bwd_distance_policy = 10
+        self._is_fwd_scheduler = _is_fwd
+
+        self.backends = {}
+
         incoming_node_len = len(nodes)
 
         if _is_fwd:
@@ -842,7 +848,16 @@ class Scheduler:
             - self.score_fusion(): assigns priority to a given fusion
         """
         fused_nodes = set(self.nodes)
-        for node1, node2 in self.get_possible_fusions():
+        possible_fusion_list = self.get_possible_fusions()
+        if possible_fusion_list:
+            print(
+                f"l_824, total possible fusions = {len(possible_fusion_list)}"
+            )
+
+        for (
+            node1,
+            node2,
+        ) in possible_fusion_list:  # self.get_possible_fusions():
             node1 = self.name_to_fused_node[node1.get_first_name()]
             node2 = self.name_to_fused_node[node2.get_first_name()]
             if self.can_fuse(
@@ -895,7 +910,73 @@ class Scheduler:
             for node_grouping in group_grouping.values():
                 check_all_pairs(node_grouping)
 
-        return sorted(possible_fusions, key=self.score_fusion_key, reverse=True)
+        # short circuit if nothing available to fuse
+        if not possible_fusions:
+            return possible_fusions
+
+        # distance filtering
+        distance_policy = (
+            self._fwd_distance_policy
+            if self._is_fwd_scheduler
+            else self._bwd_distance_policy
+        )
+        print(f"distance filtering using {distance_policy}")
+        rw_fused = 0
+        rw_blocked = 0
+        pairs_fused = 0
+        pairs_blocked = 0
+        distance_sum_blocked = []
+        distance_sum_fused = []
+
+        filtered_possible_fusions = []
+        for node1, node2 in possible_fusions:
+            score = self.score_fusion(node1, node2)
+            # print(f"l_898, {score}")
+            distance = abs(score[-1])
+            mem_savings = score[2]
+
+            if distance_policy and distance > distance_policy:
+                print(
+                    f"blocked ==> distance {distance}, policy = {distance_policy}"
+                )
+                pairs_blocked += 1
+                rw_blocked += mem_savings
+                distance_sum_blocked.append(distance)
+            else:
+                filtered_possible_fusions.append((node1, node2))
+                pairs_fused += 1
+                rw_fused += mem_savings
+                distance_sum_fused.append(distance)
+
+        # print filtered impact
+        avg_filtered_distance = 0
+        avg_fused_distance = 0
+
+        if distance_sum_blocked:
+            avg_filtered_distance = round(
+                sum(distance_sum_blocked) / len(distance_sum_blocked), 5
+            )
+        if distance_sum_fused:
+            avg_fused_distance = round(
+                sum(distance_sum_fused) / len(distance_sum_fused), 5
+            )
+
+        print(f"\nfiltered out stats ==============")
+        print(f"{pairs_blocked=}, preventing savings of {rw_blocked}")
+        if avg_filtered_distance:
+            print(
+                f"average distance of blocked pairs = {avg_filtered_distance}"
+            )
+        print(f"\n fused stats =============")
+        print(f"{pairs_fused=}, saving {rw_fused} memory")
+        if avg_fused_distance:
+            print(f"average distance of FUSED pairs = {avg_fused_distance}\n")
+
+        sorted_possible_fusions = sorted(
+            filtered_possible_fusions, key=self.score_fusion_key, reverse=True
+        )
+
+        return sorted_possible_fusions
 
     def will_fusion_create_cycle(self, node1, node2):
         """Finds whether there's a path from src to dst caused indirectly by fusion"""
