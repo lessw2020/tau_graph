@@ -17,7 +17,7 @@ def timed(fn):
 
 # Generates random input and targets data for the model, where `b` is
 # batch size.
-def generate_data(b, img_size=128):
+def generate_data(b, img_size=224):
     return (
         torch.randn(b, 3, img_size, img_size).to(torch.float32).cuda(),
         torch.randint(1000, (b,)).cuda(),
@@ -66,7 +66,7 @@ _device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
 def init_model():
     print(f"initing model")
-    return resnet18().to(torch.float32).cuda()
+    return vit_b_16().to(torch.float32).cuda()
 
 
 def eval(mod, inp):
