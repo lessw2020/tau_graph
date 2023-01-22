@@ -1,5 +1,6 @@
 import torch
 import torch._dynamo as dynamo
+from typing import Union, List, Literal
 
 # Returns the result of running `fn()` and the time it took for `fn()` to run,
 # in seconds. We use CUDA events and synchronization for the most accurate
@@ -16,20 +17,52 @@ def timed(fn):
 
 # Generates random input and targets data for the model, where `b` is
 # batch size.
-def generate_data(b):
+def generate_data(b, img_size=224):
     return (
-        torch.randn(b, 3, 128, 128).to(torch.float32).cuda(),
+        torch.randn(b, 3, img_size, img_size).to(torch.float32).cuda(),
         torch.randint(1000, (b,)).cuda(),
     )
 
+#def generate_data_linear(b ):
+#    return 
 
 N_ITERS = 10
 
 from torchvision.models import resnet18
 
+from torchvision.models import vit_b_16
 
-def init_model():
-    return resnet18().to(torch.float32).cuda()
+import torch.nn as nn
+
+
+class ReplicaModel(nn.Module):
+    def __init__(self, layer_count: int = 2, _with_bias: bool = False) -> None:
+        super().__init__()
+        self.seq = nn.Sequential(
+            *[nn.Linear(10, 10, bias=_with_bias) for _ in range(layer_count)]
+        )
+
+    def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Literal[0]]:
+        return sum([self.seq(x)])
+
+
+# control depth of ReplicaModel
+layers = 4
+_device_type = "cuda" if torch.cuda.is_available() else "cpu"
+
+# model = Permute().to(rank)  #
+model = ReplicaModel(layer_count=layers).to(_device_type)
+
+# permute_input = x = torch.randn(2, 10, 40).to("cuda")
+x = torch.randn(2, 10).to(_device_type)
+
+
+# fire off comms
+# spmd(x).sum().backward()
+
+
+def init_model(model):
+    return model.to(torch.float32).cuda()
 
 
 def eval(mod, inp):
@@ -75,7 +108,9 @@ print("~" * 10)
 """
 import numpy as np
 
-model = init_model()
+model_shell = ReplicaModel()
+
+model = init_model(model_shell)
 opt = torch.optim.Adam(model.parameters())
 
 
