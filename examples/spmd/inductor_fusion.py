@@ -17,14 +17,15 @@ def timed(fn):
 
 # Generates random input and targets data for the model, where `b` is
 # batch size.
-def generate_data(b, img_size=224):
+def generate_data(b, img_size=128):
     return (
         torch.randn(b, 3, img_size, img_size).to(torch.float32).cuda(),
         torch.randint(1000, (b,)).cuda(),
     )
 
-#def generate_data_linear(b ):
-#    return 
+
+# def generate_data_linear(b ):
+#    return
 
 N_ITERS = 10
 
@@ -33,6 +34,8 @@ from torchvision.models import resnet18
 from torchvision.models import vit_b_16
 
 import torch.nn as nn
+
+torch.set_float32_matmul_precision("high")
 
 
 class ReplicaModel(nn.Module):
@@ -51,18 +54,19 @@ layers = 4
 _device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
 # model = Permute().to(rank)  #
-model = ReplicaModel(layer_count=layers).to(_device_type)
+# model = ReplicaModel(layer_count=layers).to(_device_type)
 
 # permute_input = x = torch.randn(2, 10, 40).to("cuda")
-x = torch.randn(2, 10).to(_device_type)
+# x = torch.randn(2, 10).to(_device_type)
 
 
 # fire off comms
 # spmd(x).sum().backward()
 
 
-def init_model(model):
-    return model.to(torch.float32).cuda()
+def init_model():
+    print(f"initing model")
+    return resnet18().to(torch.float32).cuda()
 
 
 def eval(mod, inp):
@@ -108,9 +112,9 @@ print("~" * 10)
 """
 import numpy as np
 
-model_shell = ReplicaModel()
+# model_shell = ReplicaModel()
 
-model = init_model(model_shell)
+model = init_model()
 opt = torch.optim.Adam(model.parameters())
 
 
@@ -121,12 +125,14 @@ def train(mod, data):
 
 
 eager_times = []
+print("starting eager")
 for i in range(N_ITERS):
     inp = generate_data(16)
     opt.zero_grad(True)
     _, eager_time = timed(lambda: train(model, inp))
     opt.step()
-    eager_times.append(eager_time)
+    if i > 0:
+        eager_times.append(eager_time)
     print(f"eager train time {i}: {eager_time}")
 print("~" * 10)
 
@@ -140,7 +146,8 @@ for i in range(N_ITERS):
     opt.zero_grad(True)
     _, dynamo_time = timed(lambda: train_opt(model, inp))
     opt.step()
-    dynamo_times.append(dynamo_time)
+    if i > 0:
+        dynamo_times.append(dynamo_time)
     print(f"dynamo train time {i}: {dynamo_time}")
 print("~" * 10)
 
