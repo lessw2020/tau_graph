@@ -1,46 +1,45 @@
-from dataclasses import dataclass
-from enum import Enum, auto
-from functools import partial
-from typing import Dict, List, Optional, Sequence, Set, Tuple, cast
 import logging
+from dataclasses import dataclass
+from enum import auto, Enum
+from functools import partial
+from typing import cast, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 import torch.fx as fx
 import torch.nn as nn
 from functorch.compile import aot_module, make_boxed_func
+
+from spmd.tensor import (
+    _CURRENT_DECOMPOSITION_TABLE,
+    _Partial,
+    _redistribute_with_local_tensor,
+    DeviceMesh,
+    DTensor,
+    operator_dispatch,
+    Placement,
+    propagate_input_sharding,
+    Replicate,
+    Shard,
+)
 from torch.distributed._spmd.comm_tensor import _get_tracer
 from torch.fx.experimental.proxy_tensor import (
     make_fx,
-    maybe_disable_fake_tensor_mode,
     proxy_slot,
+    maybe_disable_fake_tensor_mode,
 )
 from torch.utils._pytree import tree_flatten, tree_map, tree_unflatten
 
-from spmd.compiler.log_utils import get_logger
-from spmd.tensor import (
-    _CURRENT_DECOMPOSITION_TABLE,
-    DeviceMesh,
-    DTensor,
-    Placement,
-    Replicate,
-    Shard,
-    _Partial,
-    _redistribute_with_local_tensor,
-    operator_dispatch,
-    propagate_input_sharding,
-)
-
 from .aot_function_patch import patched_aot_function
 from .distributed_graph import DistributedGraph
-from .graph_utils import OP, CommType, get_comm_block_nodes
-
-from torch._subclasses.fake_tensor import FakeTensorMode
+from .graph_utils import CommType, get_comm_block_nodes, OP
+from .log_utils import rank0_info
 
 # patch aot_function so that we can pass the full (non-sharded) input to capture the graph
 # pyre-fixme
 torch._functorch.aot_autograd.aot_function = patched_aot_function
 
-logger: Optional[logging.Logger] = None
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class TrainingPhase(Enum):
@@ -117,6 +116,8 @@ def _get_dtensor_dispatch_graph(
             kwargs,  # kwargs in this set of tests are all constants
             DTensor._op_to_rules,
             DTensor._custom_dispatch_ops,
+            # TODO need to pass default mesh here for tensor creation ops
+            # default_mesh=...
         )
         node_to_obj[node] = out
 
@@ -272,16 +273,18 @@ def _convert_output(
                         dtn, lambda n: value_remap[n]
                     )
     if has_partial:
+        rank0_info(logger, "The output has partial arguments.")
         gm.graph.erase_node(node)
         return gm.graph.output(new_args)
     else:
+        rank0_info(logger, "The output does not have partial arguments.")
         return node
 
 
 def _rebuild_graph(
     gm: fx.GraphModule,
     node_replacements: Dict[torch.fx.Node, torch.fx.GraphModule],
-) -> None:
+) -> Dict[torch.fx.Node, torch.fx.Node]:
     # replace nodes in local traced graph with DTensor's dispatch graph
     new_nodes: Dict[torch.fx.Node, torch.fx.Node] = {}
     for node in gm.graph.nodes:
@@ -343,13 +346,17 @@ def _rebuild_graph(
                     value_remap[dtn] = gm.graph.node_copy(
                         dtn, lambda n: value_remap[n]
                     )
+            # this ensures that we removed this node even if something
+            # (like inplace ops) would prevent it from being deleted.
+            gm.graph.erase_node(node)
 
     gm.graph.lint()
     gm.graph.eliminate_dead_code()
     gm.recompile()
+    return new_nodes
 
 
-def _get_user_to_last_uses(
+def get_user_to_last_uses(
     graph: fx.Graph,
 ) -> Dict[fx.Node, List[fx.Node]]:
     # Run through reverse nodes and record the first instance of a use
@@ -377,25 +384,26 @@ def _convert_to_distributed(
     inps: List[torch.Tensor],
     schemas: List[Schema],
     _allow_partial: bool = False,
-) -> Tuple[fx.GraphModule, Dict[str, Schema]]:
+) -> Tuple[fx.GraphModule, Dict[str, Schema], List[Schema]]:
     """
     Returns:
         - transformed graph module
         - map from output name to DTensorSpec
+        - a list with output Schemas in the order they appear in output,
+          with None for non DTensor entries.
     """
-    global logger
-    logger = get_logger("spmd_exp")  # type: ignore
     node_to_obj: Dict[fx.Node, object] = {}
     # map local op node in traced_f to its corresponding subgraph of
     # DTensor ops.
     node_replacements: Dict[torch.fx.Node, torch.fx.GraphModule] = {}
 
-    user_to_last_uses = _get_user_to_last_uses(gm.graph)
+    user_to_last_uses = get_user_to_last_uses(gm.graph)
 
-    logger.info(f"Training phase: {training_phase}")  # type: ignore
+    rank0_info(logger, f"Training phase: {training_phase}")
     output_schemas: Dict[str, Schema] = {}
+    output_schemas_list = []
     for i, node in enumerate(gm.graph.nodes):
-        logger.info(f"node{i}: op={node.op} target={node.target}")  # type: ignore
+        rank0_info(logger, f"node{i}: op={node.op} target={node.target}")
         if node.op == OP.PLACEHOLDER:
             assert i < len(
                 inps
@@ -424,9 +432,11 @@ def _convert_to_distributed(
                 if isinstance(a, fx.Node):
                     obj = node_to_obj[a]
                     if isinstance(obj, DTensor):
-                        output_schemas[a.name] = Schema(
+                        schema = Schema(
                             obj.device_mesh, obj.placements  # type: ignore
                         )
+                        output_schemas[a.name] = schema
+                        output_schemas_list.append(schema)
 
         elif node.op == OP.CALL_FUNCTION:
 
@@ -456,7 +466,7 @@ def _convert_to_distributed(
 
     _rebuild_graph(gm, node_replacements)
 
-    return gm, output_schemas
+    return gm, output_schemas, output_schemas_list
 
 
 class _SPMD:
@@ -579,7 +589,7 @@ class _SPMD:
                 else:
                     schemas.append(shard_schema)
 
-        parallelized_gm, output_specs = _convert_to_distributed(
+        parallelized_gm, output_specs, _ = _convert_to_distributed(
             training_phase,
             gm,
             inps,
@@ -599,16 +609,18 @@ class _SPMD:
         return make_boxed_func(parallelized_gm)
 
 
+from torch._subclasses.fake_tensor import FakeTensorMode
+
+
 def distribute(
     dist_graph: DistributedGraph,
     param_schema: Schema,
     input_schemas: Sequence[Placement],
-    optimize_first_iter: bool,
+    force_compile: bool,
     map_param_and_grad: bool,
     *args: Tuple[object],
     **kwargs: Dict[str, object],
 ) -> nn.Module:
-
     flat_args, _ = tree_flatten(args)
     flat_kwargs, _ = tree_flatten(kwargs)
     input_set: Set[object] = set(flat_args + flat_kwargs)
@@ -654,7 +666,7 @@ def distribute(
     #
     # TODO(chienchin): figure out how to be compatible with optimizer state_dict
     # loading.
-    if optimize_first_iter:
+    if force_compile:
         output = compiled_m(*args, **kwargs)
         # Force to compile the backward
         output.sum().backward()
