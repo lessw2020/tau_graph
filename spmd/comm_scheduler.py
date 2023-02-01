@@ -929,27 +929,67 @@ class Scheduler:
                 index = int(name[3:])  # strip buf
             return index
 
-        def get_pool_bounds(index):
-            """obtain min/max indexes for given comm pool"""
+        def get_bounds_linear_scan(index):
             # linear scan for now, binary search next
             low = -1
             high = float("inf")
+            if self.debugger:
+                print(f"start index = {index}")
             for ptr, upper in enumerate(self.comm_pools[1:]):
-                if self.debugger:
-                    print(f"pool loop {index, ptr, upper}")
+                # if self.debugger:
+                # print(f"pool loop {index, ptr, upper}")
                 if index > upper:
                     continue
                 low = self.comm_pools[ptr]
                 high = upper
-                if self.debugger:
-                    print(f"returning {low=}, {high=}")
             return (low, high)
+
+        def get_bounds_binary_search(index):
+            ars = self.comm_pools  # for shorter code
+            target = index
+            l = 0
+            r = len(self.comm_pools) - 1
+            while l <= r:
+                mid = (l + r) // 2
+                midval = ars[mid]
+                if target >= midval and target < ars[mid + 1]:
+                    l = mid
+                    r = mid + 1
+                    if self.debugger:
+                        print(f"located: {target=}, lower {ars[l]}, upper {ars[r]}")
+                    break
+                if target > midval:
+                    l = mid + 1
+                else:
+                    r = mid - 1
+            return (ars[l], ars[r])  # low and high value
+
+        def get_pool_bounds(index):
+            """obtain min/max indexes for given comm pool"""
+            # linear scan
+            # lowscan, highscan = get_bounds_linear_scan(index)
+            # use binary search
+            lowbin, highbin = get_bounds_binary_search(index)
+
+            """if self.debugger:
+                print(
+                    f" target {index}, {lowbin=}, {lowscan=} // {highbin=}, {highscan=}"
+                )
+            """
+            """assert (
+                lowscan == lowbin
+            ), f" mismatch between linear {lowscan} and binary low {lowbin}"
+            assert (
+                highscan == highbin
+            ), f"mismatch for high scan, linear {highscan}, binary {highbin}"
+            """
+            return (lowbin, highbin)
 
         def get_comm_bounds(node1):
             """get the pool for this node"""
             index = get_index(node1)
-            low, high = get_pool_bounds(index)
-            return (low, high)
+            lowval, highval = get_pool_bounds(index)
+            return (lowval, highval)
 
             # if self.debugger:
             #   print(f"checking bounds for {index} of {name}")
