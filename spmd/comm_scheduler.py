@@ -653,10 +653,10 @@ class Scheduler:
             print(f"======= allreduce and wait mappings ==========\n")
             for k, v in self.ar_map.items():
 
-                print(f"{k},\n {type(v[0])}, {v[0]}, {type(v[1])}\n")
+                print(f"{k},\n {v[0]}, {type(v[1])}\n")
             for k, v in self.wait_map.items():
 
-                print(f"{k},\n {type(v[0])}, {v[0]}, {type(v[1])}\n")
+                print(f"{k},\n {v[0]}, {type(v[1])}\n")
             print(f"----------------------------\n")
 
         if len(self.ar_map):
@@ -920,9 +920,45 @@ class Scheduler:
         """
         possible_fusions = []
         seen = set()
+        # comm check
+        def get_index(name, node1):
+            if "_" in name:
+                index = node1.min_order
+            else:
+                index = int(name[3:])  # strip buf
+            return index
+
+        def get_pool_bounds(index):
+            """obtain min/max indexes for given comm pool"""
+            # linear scan for now, binary search next
+            low = -1
+            high = float("inf")
+            for ptr, upper in enumerate(self.comm_pools[1:]):
+                if self.debugger:
+                    print(f"pool loop {index, ptr, upper}")
+                if index > upper:
+                    continue
+                low = self.comm_pools[ptr]
+                high = upper
+                if self.debugger:
+                    print(f"returning {low=}, {high=}")
+            return (low, high)
+
+        def get_comm_bounds(node1):
+            """get the pool for this node"""
+            name = node1.get_name()
+            index = get_index(name, node1)
+            low, high = get_pool_bounds(index)
+
+            # if self.debugger:
+            #   print(f"checking bounds for {index} of {name}")
+            #   print(f"bounds = {low, high}")
 
         def check_all_pairs(nodes):
             for node1_index, node1 in enumerate(nodes):
+                if self.has_comms:
+                    get_comm_bounds(node1)
+
                 for node2 in nodes[node1_index + 1 :]:
                     key = (node1, node2)
                     if key in seen:
