@@ -921,7 +921,8 @@ class Scheduler:
         possible_fusions = []
         seen = set()
         # comm check
-        def get_index(name, node1):
+        def get_index(node1):
+            name = node1.get_name()
             if "_" in name:
                 index = node1.min_order
             else:
@@ -946,20 +947,32 @@ class Scheduler:
 
         def get_comm_bounds(node1):
             """get the pool for this node"""
-            name = node1.get_name()
-            index = get_index(name, node1)
+            index = get_index(node1)
             low, high = get_pool_bounds(index)
+            return (low, high)
 
             # if self.debugger:
             #   print(f"checking bounds for {index} of {name}")
             #   print(f"bounds = {low, high}")
 
+        def is_valid_comm_pair(node2, low, high):
+            index = get_index(node2)
+            is_valid = index >= low and index < high
+            if self.debugger:
+                print(f"is valid result {is_valid}, {index=}, {low=}, {high=}")
+            return is_valid
+
         def check_all_pairs(nodes):
             for node1_index, node1 in enumerate(nodes):
                 if self.has_comms:
-                    get_comm_bounds(node1)
+                    low, high = get_comm_bounds(node1)
 
                 for node2 in nodes[node1_index + 1 :]:
+                    if self.has_comms:
+                        if not (is_valid_comm_pair(node2, low, high)):
+                            if self.debugger:
+                                print(f"blocked {node2.get_name()}, {low=}, {high=}")
+                            continue
                     key = (node1, node2)
                     if key in seen:
                         continue
