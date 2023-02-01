@@ -622,6 +622,8 @@ class Scheduler:
         self.ar_map = {}  # buf name -> node, index
         self.wait_map = {}  # buf name -> node, index
         self.comm_pools = []  # store boundaries of available nodes for op fusions
+        metrics.num_possible_fusions = 0
+        metrics.num_blocked_fusions = 0
 
         # convert ir to scheduler nodes
         for index, node in enumerate(nodes):
@@ -667,8 +669,8 @@ class Scheduler:
                 index = v[-1]
                 self.comm_pools.append(index)
                 name = v[1].get_name()
-                if self.debugger:
-                    print(f"adding {name} as boundary at index {index}\n")
+                # if self.debugger:
+                #    print(f"adding {name} as boundary at index {index}\n")
             self.comm_pools.append(float("inf"))
 
             if self.debugger:
@@ -714,6 +716,18 @@ class Scheduler:
         self.current_device = None
         self.buffer_names_to_free = set()
         self.buffer_names_no_longer_needed = set()
+
+        # show stats for comm pools
+        if self.debugger:
+            print(
+                f"total possible fusions = {metrics.num_all_possible_fusions},\n total blocked by comm {metrics.num_comm_blocked_fusions}"
+            )
+            if metrics.num_comm_blocked_fusions:
+                pct_blocked = round(
+                    metrics.num_comm_blocked_fusions / metrics.num_all_possible_fusions,
+                    4,
+                )
+                print(f" pct blocked by comm pools: {pct_blocked}")
 
     def debug_draw_graph(self):
         """Generate an image of the graph for debugging"""
@@ -944,45 +958,50 @@ class Scheduler:
                 high = upper
             return (low, high)
 
-        def get_bounds_binary_search(index):
+        def get_bounds_binary_search(target):
             ars = self.comm_pools  # for shorter code
-            target = index
             l = 0
             r = len(self.comm_pools) - 1
+
+            if self.debugger:
+                print(f"bin search {target=} within {self.comm_pools}")
+
             while l <= r:
                 mid = (l + r) // 2
                 midval = ars[mid]
+                if self.debugger:
+                    print(f"{mid=}, {midval=}, {l=}, {r=}")
                 if target >= midval and target < ars[mid + 1]:
                     l = mid
                     r = mid + 1
                     if self.debugger:
                         print(f"located: {target=}, lower {ars[l]}, upper {ars[r]}")
+
                     break
                 if target > midval:
                     l = mid + 1
                 else:
+                    # have to check if mid satisfies
+                    if target >= ars[l] and ars[mid]:
+                        r = mid
+                        # if self.debugger:
+                        #    print(
+                        #       f"located with mid r: {target=}, lower {ars[l]}, upper {ars[r]}"
+                        #   )
+                        break
                     r = mid - 1
+
+                assert (
+                    ars[l] <= target < ars[r]
+                ), f"target node index {target} is not within pool bounds {ars[l]} and {ars[r]}"
+
             return (ars[l], ars[r])  # low and high value
 
         def get_pool_bounds(index):
             """obtain min/max indexes for given comm pool"""
-            # linear scan
-            # lowscan, highscan = get_bounds_linear_scan(index)
             # use binary search
             lowbin, highbin = get_bounds_binary_search(index)
 
-            """if self.debugger:
-                print(
-                    f" target {index}, {lowbin=}, {lowscan=} // {highbin=}, {highscan=}"
-                )
-            """
-            """assert (
-                lowscan == lowbin
-            ), f" mismatch between linear {lowscan} and binary low {lowbin}"
-            assert (
-                highscan == highbin
-            ), f"mismatch for high scan, linear {highscan}, binary {highbin}"
-            """
             return (lowbin, highbin)
 
         def get_comm_bounds(node1):
@@ -991,15 +1010,11 @@ class Scheduler:
             lowval, highval = get_pool_bounds(index)
             return (lowval, highval)
 
-            # if self.debugger:
-            #   print(f"checking bounds for {index} of {name}")
-            #   print(f"bounds = {low, high}")
-
         def is_valid_comm_pair(node2, low, high):
             index = get_index(node2)
             is_valid = index >= low and index < high
-            if self.debugger:
-                print(f"is valid result {is_valid}, {index=}, {low=}, {high=}")
+            # if self.debugger:
+            #    print(f"is valid result {is_valid}, {index=}, {low=}, {high=}")
             return is_valid
 
         def check_all_pairs(nodes):
@@ -1008,10 +1023,12 @@ class Scheduler:
                     low, high = get_comm_bounds(node1)
 
                 for node2 in nodes[node1_index + 1 :]:
+                    metrics.num_all_possible_fusions += 1
                     if self.has_comms:
                         if not (is_valid_comm_pair(node2, low, high)):
-                            if self.debugger:
-                                print(f"blocked {node2.get_name()}, {low=}, {high=}")
+                            # if self.debugger:
+                            #    print(f"blocked {node2.get_name()}, {low=}, {high=}")
+                            metrics.num_comm_blocked_fusions += 1
                             continue
                     key = (node1, node2)
                     if key in seen:
