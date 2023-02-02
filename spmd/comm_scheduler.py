@@ -966,11 +966,22 @@ class Scheduler:
             if self.debugger:
                 print(f"bin search {target=} within {self.comm_pools}")
 
+            # avoid bsearch if upper or lower extreme
+            if target >= ars[-2]:
+                if self.debugger:
+                    print(f" short circuit for {target} via upper")
+                return (ars[-2], ars[-1])
+            if target < ars[1]:
+                if self.debugger:
+                    print(f" short circuit for {target} via lower")
+                return (ars[0], ars[1])
+
             while l <= r:
-                mid = (l + r) // 2
+                mid = l + (r - l) // 2
                 midval = ars[mid]
                 if self.debugger:
                     print(f"{mid=}, {midval=}, {l=}, {r=}")
+
                 if target >= midval and target < ars[mid + 1]:
                     l = mid
                     r = mid + 1
@@ -981,15 +992,7 @@ class Scheduler:
                 if target > midval:
                     l = mid + 1
                 else:
-                    # have to check if mid satisfies
-                    if target >= ars[l] and ars[mid]:
-                        r = mid
-                        # if self.debugger:
-                        #    print(
-                        #       f"located with mid r: {target=}, lower {ars[l]}, upper {ars[r]}"
-                        #   )
-                        break
-                    r = mid - 1
+                    r = mid
 
                 assert (
                     ars[l] <= target < ars[r]
