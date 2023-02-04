@@ -977,7 +977,7 @@ class Scheduler:
                 return (ars[0], ars[1])
 
             while l <= r:
-                mid = l + (r - l) // 2
+                mid = l + ((r - l) // 2)
                 midval = ars[mid]
                 if self.debugger:
                     print(f"{mid=}, {midval=}, {l=}, {r=}")
