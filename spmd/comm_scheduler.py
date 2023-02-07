@@ -23,6 +23,10 @@ import torch.distributed as dist
 
 log = logging.getLogger(__name__)
 
+# from .debug import create_fx_from_snodes, draw_buffers
+
+# from .debug import draw_buffers
+
 
 def pformat(obj):
     if isinstance(obj, set):
@@ -617,7 +621,8 @@ class Scheduler:
             *V.graph.constants.keys(),
         }
 
-        # comm specifid
+        # comm specific
+        self.enforce_pools = False
         self.has_comms = False
         self.ar_map = {}  # buf name -> node, index
         self.wait_map = {}  # buf name -> node, index
@@ -693,6 +698,9 @@ class Scheduler:
         self.compute_predecessors()
         self.dead_node_elimination()
 
+        # if self.debugger:
+        #    self.debug_draw_graph(print_graph=True, fname="prefusion")
+
         if self.debugger:
             print(f"dne = {V.graph.removed_buffers=}")
         for k in self.wait_map.keys():
@@ -704,19 +712,39 @@ class Scheduler:
         self.num_orig_nodes = len(self.nodes)
         self.name_to_fused_node = {n.get_name(): n for n in self.nodes}
 
+        prefusion_gm = self.debug_get_fx_gm()
+
         self.fuse_nodes()
 
         self.compute_last_usage()
 
         V.debug.ir_post_fusion(self.nodes)
         V.debug.graph_diagram(self.nodes)
-        self.debug_draw_graph()
+        # self.debug_draw_graph()
+        # if self.debugger:
+        #    self.debug_draw_graph(print_graph=True, fname="post-fusion")
 
         # used during codegen:
         self.current_device = None
         self.buffer_names_to_free = set()
         self.buffer_names_no_longer_needed = set()
 
+        # post fusion graph
+        postfusion_gm = self.debug_get_fx_gm()
+
+        if self.debugger:
+            print(f"{prefusion_gm.graph.print_tabular()}")
+            print(f"============== divider ==================")
+            print(f"{postfusion_gm.graph.print_tabular()}")
+            print(f" =========== end fx graphs ==========")
+
+            # extract data from graphs
+            prebyte = self.debug_show_graph_data(prefusion_gm)
+            postbyte = self.debug_show_graph_data(postfusion_gm)
+
+            # compare
+            print(f"prefusion len = {len(prebyte)}, postfusion len = {len(postbyte)}")
+            print(f"{prebyte=}\n {postbyte=}\n")
         # show stats for comm pools
         if self.debugger:
             print(
@@ -729,12 +757,54 @@ class Scheduler:
                 )
                 print(f" pct blocked by comm pools: {pct_blocked}")
 
-    def debug_draw_graph(self):
-        """Generate an image of the graph for debugging"""
-        if os.environ.get("INDUCTOR_WRITE_SCHEDULER_GRAPH", None) == "1":
-            from .debug import draw_buffers
+        ## ---- end scheduler process ------
 
-            draw_buffers(self.nodes, print_graph=True)
+    def debug_show_graph_data(self, gm) -> List:
+        byte_schedule = []
+        # do we have metadata
+        postgraph = gm.graph
+        for node in postgraph.nodes:
+            name = node.name
+            print(f"{name} ---- ")
+            if node.op == "placeholder":
+                continue
+
+            metadata = node.meta.get("tensor_meta", None)
+            if metadata is None:
+                continue
+
+            print(f"metadata type = {type(metadata)}")
+            # size = metadata.shape.numel()
+            shape = metadata.shape
+            if isinstance(shape, tuple):
+                product = 1
+                for elem in shape:
+                    product *= elem
+                print(f"{name} has shape {shape}, size {product*4} bytes")
+                byte_schedule.append(product)
+            else:
+                print(f"{name} is type {shape}")
+
+        #print(f"\n=== byte_schedule===\n {byte_schedule}")
+        return byte_schedule
+
+    def debug_get_fx_gm(
+        self,
+    ):
+        """generate an fx graph module of snodes"""
+        from .debug import get_fx_graphmodule
+
+        gm = get_fx_graphmodule(self.nodes)
+        return gm
+
+    def debug_draw_graph(self, print_graph=True, fname="base"):
+        """Generate an image of the graph for debugging"""
+        # if os.environ.get("INDUCTOR_WRITE_SCHEDULER_GRAPH", None) == "1":
+        from .debug import draw_buffers
+
+        assert False
+        # draw_buffers(nodes, print_graph=False, fname=None):
+        draw_buffers(self.nodes, print_graph=print_graph, fname=fname)
 
     def debug_print_nodes(self, label):
         if log.isEnabledFor(logging.INFO):
@@ -840,6 +910,17 @@ class Scheduler:
                 user.node.inverse_users.append(node)
 
     def dead_node_elimination(self):
+        updated_nodes = []
+        for node in self.nodes:
+            if node.users:
+                updated_nodes.append(node)
+            else:
+                # dead code
+                log.debug(f"removed node {node.get_name()}")
+                V.graph.removed_buffers.add(node.get_name())
+        self.nodes = updated_nodes
+
+    def dead_node_elimination(self):
         """
         Remove any nodes without users
         """
@@ -854,6 +935,30 @@ class Scheduler:
         self.nodes = updated_nodes
 
     def topological_sort_schedule(self):
+        seen = set()
+        name_to_node = {}
+        result = []
+
+        def visit(n):
+            seen.add(n)
+            # visit all dependencies
+            for dep in sorted(n.unmet_dependencies, key=lambda d: d.name):
+                visit(name_to_node[dep.name])
+            # at last step, save the final node
+            result.append(n)
+
+        # setup name_ to _node
+        for node in self.nodes:
+            for name in node.get_names():
+                name_to_node[name] = node
+        # visit all nodes
+        for node in self.nodes:
+            visit(node)
+        # save topo sort as node graph
+        self.nodes = result
+
+    def topological_sort_schedule(self):
+
         """
         Ensure self.nodes is in topologically sorted order
         """
@@ -894,6 +999,13 @@ class Scheduler:
             node.max_order = order
 
     def fuse_nodes(self):
+        for _ in range(10):
+            old_len = len(self.nodes)
+            self.fuse_nodes_once()
+            if len(self.nodes) == old_len:
+                break
+
+    def fuse_nodes(self):
         """
         Mutates self.nodes to combine nodes into FusedSchedulerNodes.
         """
@@ -902,6 +1014,24 @@ class Scheduler:
             self.fuse_nodes_once()
             if len(self.nodes) == old_len:
                 break
+
+    def fuse_nodes_once(self):
+        fused_nodes = set(self.nodes)
+        for n1, n2 in self.get_possible_fusions():
+            node1 = self.name_to_fused_node[n1.get_first_name()]
+            node2 = self.name_to_fused_node[n2.get_first_name()]
+            if self.can_fuse(node1, node2) and not self.will_fusion_create_cycle(
+                node1, node2
+            ):
+                node3 = FusedSchedulerNode.fuse(node1, node2)
+                fused_nodes.remove(node1)
+                fused_nodes.remove(node2)
+                fused_nodes.add(node3)
+                self.name_to_fused_node.update(
+                    {n.get_name(): node3 for n in node3.get_nodes()}
+                )
+        self.nodes = sorted(fused_nodes, key=lambda x: x.min_order)
+        self.topological_sort_schedule()
 
     def fuse_nodes_once(self):
         """
@@ -977,7 +1107,7 @@ class Scheduler:
                 return (ars[0], ars[1])
 
             while l <= r:
-                mid = l + ((r - l) // 2)
+                mid = l + (r - l) // 2
                 midval = ars[mid]
                 if self.debugger:
                     print(f"{mid=}, {midval=}, {l=}, {r=}")
@@ -1022,12 +1152,12 @@ class Scheduler:
 
         def check_all_pairs(nodes):
             for node1_index, node1 in enumerate(nodes):
-                if self.has_comms:
+                if self.has_comms and self.enforce_pools:
                     low, high = get_comm_bounds(node1)
 
                 for node2 in nodes[node1_index + 1 :]:
                     metrics.num_all_possible_fusions += 1
-                    if self.has_comms:
+                    if self.has_comms and self.enforce_pools:
                         if not (is_valid_comm_pair(node2, low, high)):
                             # if self.debugger:
                             #    print(f"blocked {node2.get_name()}, {low=}, {high=}")
