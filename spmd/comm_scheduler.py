@@ -781,7 +781,46 @@ class Scheduler:
                 )
                 print(f" pct blocked by comm pools: {pct_blocked}")
 
+        # move all waits to end
+        waits_moved = self.move_waits_to_end()
+
+        wmove_count, wmove_snodes = self.debug_show_snodes()
+
+        if self.debugger:
+            print(f"moved {waits_moved} waits")
+            print(f"after wait move = \n{wmove_snodes}")
+
         ## ---- end scheduler process ------
+
+    def move_waits_to_end(self) -> int:
+        orig_nodes = self.nodes[:]
+        new_nodes = []
+        wait_nodes = []
+        for node in self.nodes:
+            if not isinstance(node, ExternKernelSchedulerNode):
+                new_nodes.append(node)
+                continue
+            name = node.get_name()
+            # wait node
+            if name in self.wait_map:
+                wait_nodes.append(node)
+                continue
+            # other extern
+            new_nodes.append(node)
+        # confirm we got all the wait nodes
+        assert len(wait_nodes) == len(
+            self.wait_map
+        ), f"failed to get all wait nodes during move to last {self.wait_map=} vs {wait_nodes=}"
+
+        new_nodes.extend(wait_nodes)
+        len_new = len(new_nodes)
+        len_orig = len(orig_nodes)
+        assert (
+            len_new == len_orig
+        ), f"failed to move all nodes during move waits to end {len_new=},{len_orig=}"
+
+        self.nodes = new_nodes
+        return len(wait_nodes)
 
     def debug_show_snodes(self, title=None):
         sequence = []
