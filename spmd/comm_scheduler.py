@@ -850,6 +850,7 @@ class Scheduler:
                 sequence.append(out_string)
 
             elif isinstance(node, ExternKernelSchedulerNode):
+
                 size = node.node.get_size()
                 dtype = node.node.get_dtype()
                 total_size = self.get_bytes(size, dtype)
@@ -858,7 +859,12 @@ class Scheduler:
                 # print(f"{total_size=}")
                 name = node.get_name()
                 if name in self.ar_map:
-                    out_string = "AR_" + str(total_size)
+                    name, total_size, wraps = self.debug_inspect_comm(node)
+                    out_string = "AR_" + str(total_size) + "_" + wraps
+                    inner = node.node
+                    # see what else we can learn from this AR
+                    # inner node is base layout so has size, device, dtype
+                    print(f"AR details: {inner.layout.size=}, {inner.layout.dtype}")
 
                 elif name in self.wait_map:
                     out_string = "Wait_" + str(total_size)
@@ -868,9 +874,7 @@ class Scheduler:
                 sequence.append(out_string)
 
             elif isinstance(node, NopKernelSchedulerNode):
-                size = node.node.get_size()
-                dtype = node.node.get_dtype()
-                total_size = self.get_bytes(size, dtype)
+
                 # print(f"size {size}, dtype = {dtype}")
                 # print(f"{type(node)}")
                 # print(f"{total_size=}")
@@ -898,6 +902,22 @@ class Scheduler:
         prod *= byte_mul
 
         return prod
+
+    def debug_inspect_comm(self, node):
+        """queries a given scheduler comm node to determine size and dependency"""
+        if not isinstance(node, ExternKernelSchedulerNode):
+            raise ValueError(f"expected only comm related nodes, got {type(node)}")
+
+        name = node.get_name()
+        inner = node.node
+        size = inner.get_size()
+        dtype = inner.get_dtype()
+        total_size = self.get_bytes(size, dtype)
+        inner_size = inner.get_numel()
+        print(f"{inner_size=}, {size=}")
+        wraps = inner.inputs[0].data.name
+
+        return name, total_size, wraps
 
     def debug_show_graph_data(self, gm) -> List:
         byte_schedule = []
