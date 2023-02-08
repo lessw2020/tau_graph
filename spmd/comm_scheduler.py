@@ -792,12 +792,12 @@ class Scheduler:
                 internal_nodes = node.get_nodes()
 
                 for j, inode in enumerate(internal_nodes):
-                    print(f"{type(inode)}")
+                    # print(f"{type(inode)}")
                     size = inode.node.get_size()
                     dtype = inode.node.get_dtype()
                     total_size += self.get_bytes(size, dtype)
                     # print(f"size {size}, dtype = {dtype}")
-                print(f"Fused Node has {total_size} bytes")
+                # print(f"Fused Node has {total_size} bytes")
                 out_string = "Fuse:" + str(j + 1) + "_nodes_" + str(total_size)
                 sequence.append(out_string)
             elif isinstance(node, SchedulerNode):
@@ -808,6 +808,7 @@ class Scheduler:
                 # print(f"{type(node)}")
                 # print(f"{total_size=}")
                 out_string = "s_" + str(total_size)
+                sequence.append(out_string)
 
             elif isinstance(node, ExternKernelSchedulerNode):
                 size = node.node.get_size()
@@ -832,7 +833,7 @@ class Scheduler:
                 dtype = node.node.get_dtype()
                 total_size = self.get_bytes(size, dtype)
                 # print(f"size {size}, dtype = {dtype}")
-                print(f"{type(node)}")
+                # print(f"{type(node)}")
                 # print(f"{total_size=}")
                 out_string = "nop_" + str(total_size)
                 sequence.append(out_string)
