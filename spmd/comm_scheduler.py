@@ -630,6 +630,10 @@ class Scheduler:
         metrics.num_possible_fusions = 0
         metrics.num_blocked_fusions = 0
 
+        # fusion specific
+        self.prefusion_len = 0
+        self.postfusion_len = 0
+
         # convert ir to scheduler nodes
         for index, node in enumerate(nodes):
             assert (
@@ -714,9 +718,18 @@ class Scheduler:
 
         prefusion_gm = self.debug_get_fx_gm()
 
+        # compare snodes vs fx
+        pre_count, pre_snodes = self.debug_show_snodes()
+
+        self.prefusion_len = len(self.nodes)
+
+        # --------- fusion -----------
         self.fuse_nodes()
 
         self.compute_last_usage()
+
+        # -------- end fusion ---------
+        self.postfusion_len = len(self.nodes)
 
         V.debug.ir_post_fusion(self.nodes)
         V.debug.graph_diagram(self.nodes)
@@ -730,21 +743,32 @@ class Scheduler:
         self.buffer_names_no_longer_needed = set()
 
         # post fusion graph
+        post_count, post_snodes = self.debug_show_snodes()
         postfusion_gm = self.debug_get_fx_gm()
 
         if self.debugger:
-            print(f"{prefusion_gm.graph.print_tabular()}")
-            print(f"============== divider ==================")
-            print(f"{postfusion_gm.graph.print_tabular()}")
-            print(f" =========== end fx graphs ==========")
+            # print(f"{prefusion_gm.graph.print_tabular()}")
+            # print(f"============== divider ==================")
+            # print(f"{postfusion_gm.graph.print_tabular()}")
+            # print(f" =========== end fx graphs ==========")
 
             # extract data from graphs
             prebyte = self.debug_show_graph_data(prefusion_gm)
             postbyte = self.debug_show_graph_data(postfusion_gm)
 
             # compare
+            print(f"{pre_count=}, {post_count=}")
             print(f"prefusion len = {len(prebyte)}, postfusion len = {len(postbyte)}")
             print(f"{prebyte=}\n {postbyte=}\n")
+
+            # compare snodes
+            # print(
+            #    f"pre count = {len(pre_snodes)}, post fusion len = {len(post_snodes)}"
+            # )
+            print(f"---- stats ----\n {self.prefusion_len=}, {self.postfusion_len=}")
+            print(f"pre-snodes({len(pre_snodes)}): {pre_snodes}\n")
+            print(f"post-snodes({len(post_snodes)}): {post_snodes}\n")
+
         # show stats for comm pools
         if self.debugger:
             print(
@@ -759,6 +783,82 @@ class Scheduler:
 
         ## ---- end scheduler process ------
 
+    def debug_show_snodes(self, title=None):
+        sequence = []
+        print(f"====== snodes graph {title} ============")
+        for i, node in enumerate(self.nodes):
+            total_size = 0
+            if isinstance(node, FusedSchedulerNode):
+                internal_nodes = node.get_nodes()
+
+                for j, inode in enumerate(internal_nodes):
+                    print(f"{type(inode)}")
+                    size = inode.node.get_size()
+                    dtype = inode.node.get_dtype()
+                    total_size += self.get_bytes(size, dtype)
+                    # print(f"size {size}, dtype = {dtype}")
+                print(f"Fused Node has {total_size} bytes")
+                out_string = "Fuse:" + str(j + 1) + "_nodes_" + str(total_size)
+                sequence.append(out_string)
+            elif isinstance(node, SchedulerNode):
+                size = node.node.get_size()
+                dtype = node.node.get_dtype()
+                total_size = self.get_bytes(size, dtype)
+                # print(f"size {size}, dtype = {dtype}")
+                # print(f"{type(node)}")
+                # print(f"{total_size=}")
+                out_string = "s_" + str(total_size)
+
+            elif isinstance(node, ExternKernelSchedulerNode):
+                size = node.node.get_size()
+                dtype = node.node.get_dtype()
+                total_size = self.get_bytes(size, dtype)
+                # print(f"size {size}, dtype = {dtype}")
+                # print(f"{type(node)}")
+                # print(f"{total_size=}")
+                name = node.get_name()
+                if name in self.ar_map:
+                    out_string = "AR_" + str(total_size)
+
+                elif name in self.wait_map:
+                    out_string = "Wait_" + str(total_size)
+                else:
+                    out_string = "Extern_" + str(total_size)
+
+                sequence.append(out_string)
+
+            elif isinstance(node, NopKernelSchedulerNode):
+                size = node.node.get_size()
+                dtype = node.node.get_dtype()
+                total_size = self.get_bytes(size, dtype)
+                # print(f"size {size}, dtype = {dtype}")
+                print(f"{type(node)}")
+                # print(f"{total_size=}")
+                out_string = "nop_" + str(total_size)
+                sequence.append(out_string)
+
+            else:
+                print(f"unknown - {node.get_name()}, {type(node)}")
+                sequence.append("Uknown")
+
+        print(f"total of {i+1} nodes")
+        print(f" ------------------------\n")
+        return i + 1, sequence
+
+    def get_bytes(self, size, dtype):
+        byte_mul = 1
+        if dtype == torch.float32:
+            byte_mul = 4
+        elif dtype in [torch.bfloat16, torch.float16]:
+            byte_mul = 2
+
+        prod = 1
+        for elem in size:
+            prod *= elem
+        prod *= byte_mul
+
+        return prod
+
     def debug_show_graph_data(self, gm) -> List:
         byte_schedule = []
         # do we have metadata
@@ -768,6 +868,8 @@ class Scheduler:
             print(f"{name} ---- ")
             if node.op == "placeholder":
                 continue
+            if node.op == "output":
+                byte_schedule.append("out")
 
             metadata = node.meta.get("tensor_meta", None)
             if metadata is None:
@@ -783,9 +885,17 @@ class Scheduler:
                 print(f"{name} has shape {shape}, size {product*4} bytes")
                 byte_schedule.append(product)
             else:
+                if shape == "extern":
+                    print(f"extern kernel")
+                    if name in self.ar_map:
+                        print(f"all-reduce node")
+                        byte_schedule.append("AR")
+                    elif name in self.wait_map:
+                        print(f"wait node")
+                        byte_schedule.append("Wait")
                 print(f"{name} is type {shape}")
 
-        #print(f"\n=== byte_schedule===\n {byte_schedule}")
+        # print(f"\n=== byte_schedule===\n {byte_schedule}")
         return byte_schedule
 
     def debug_get_fx_gm(
