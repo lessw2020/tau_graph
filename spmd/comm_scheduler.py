@@ -743,10 +743,10 @@ class Scheduler:
         self.buffer_names_no_longer_needed = set()
 
         # post fusion graph
-        post_count, post_snodes = self.debug_show_snodes()
-        postfusion_gm = self.debug_get_fx_gm()
-
         if self.debugger:
+            post_count, post_snodes = self.debug_show_snodes()
+            postfusion_gm = self.debug_get_fx_gm()
+
             # print(f"{prefusion_gm.graph.print_tabular()}")
             # print(f"============== divider ==================")
             # print(f"{postfusion_gm.graph.print_tabular()}")
@@ -765,7 +765,9 @@ class Scheduler:
             # print(
             #    f"pre count = {len(pre_snodes)}, post fusion len = {len(post_snodes)}"
             # )
-            print(f"---- stats ----\n {self.prefusion_len=}, {self.postfusion_len=}")
+            print(
+                f"---- stats ----\n {self.prefusion_len=}, \n{self.postfusion_len=}\n"
+            )
             print(f"pre-snodes({len(pre_snodes)}): {pre_snodes}\n")
             print(f"post-snodes({len(post_snodes)}): {post_snodes}\n")
 
@@ -784,9 +786,8 @@ class Scheduler:
         # move all waits to end
         waits_moved = self.move_waits_to_end()
 
-        wmove_count, wmove_snodes = self.debug_show_snodes()
-
         if self.debugger:
+            wmove_count, wmove_snodes = self.debug_show_snodes()
             print(f"moved {waits_moved} waits")
             print(f"after wait move = \n{wmove_snodes}")
 
@@ -824,9 +825,10 @@ class Scheduler:
 
     def debug_show_snodes(self, title=None):
         sequence = []
-        print(f"====== snodes graph {title} ============")
+        # print(f"====== snodes graph {title} ============")
         for i, node in enumerate(self.nodes):
             total_size = 0
+            name = node.get_name()
             if isinstance(node, FusedSchedulerNode):
                 internal_nodes = node.get_nodes()
 
@@ -837,8 +839,9 @@ class Scheduler:
                     total_size += self.get_bytes(size, dtype)
                     # print(f"size {size}, dtype = {dtype}")
                 # print(f"Fused Node has {total_size} bytes")
-                out_string = "Fuse:" + str(j + 1) + "_nodes_" + str(total_size)
+                out_string = "Fuse_" + str(j + 1) + name + "_nodes_" + str(total_size)
                 sequence.append(out_string)
+
             elif isinstance(node, SchedulerNode):
                 size = node.node.get_size()
                 dtype = node.node.get_dtype()
@@ -846,7 +849,7 @@ class Scheduler:
                 # print(f"size {size}, dtype = {dtype}")
                 # print(f"{type(node)}")
                 # print(f"{total_size=}")
-                out_string = "s_" + str(total_size)
+                out_string = "sched_" + name + "_" + str(total_size)
                 sequence.append(out_string)
 
             elif isinstance(node, ExternKernelSchedulerNode):
@@ -854,39 +857,37 @@ class Scheduler:
                 size = node.node.get_size()
                 dtype = node.node.get_dtype()
                 total_size = self.get_bytes(size, dtype)
-                # print(f"size {size}, dtype = {dtype}")
-                # print(f"{type(node)}")
-                # print(f"{total_size=}")
-                name = node.get_name()
+
                 if name in self.ar_map:
-                    name, total_size, wraps = self.debug_inspect_comm(node)
-                    out_string = "AR_" + str(total_size) + "_" + wraps
-                    inner = node.node
-                    # see what else we can learn from this AR
-                    # inner node is base layout so has size, device, dtype
-                    print(f"AR details: {inner.layout.size=}, {inner.layout.dtype}")
+                    _, total_size, wraps = self.debug_inspect_comm(node)
+                    out_string = "AR_" + name + "_" + str(total_size) + "_" + wraps
 
                 elif name in self.wait_map:
-                    out_string = "Wait_" + str(total_size)
+                    _, total_size, wraps = self.debug_inspect_comm(node)
+                    out_string = "Wait_" + name + "_" + str(total_size) + "_" + wraps
+                    # print(f"wait processing...")
+
                 else:
-                    out_string = "Extern_" + str(total_size)
+                    out_string = "Extern_" + name + "_" + str(total_size)
 
                 sequence.append(out_string)
 
             elif isinstance(node, NopKernelSchedulerNode):
-
+                size = node.node.get_size()
+                dtype = node.node.get_dtype()
+                total_size = self.get_bytes(size, dtype)
                 # print(f"size {size}, dtype = {dtype}")
                 # print(f"{type(node)}")
                 # print(f"{total_size=}")
-                out_string = "nop_" + str(total_size)
+                out_string = "nop_" + name + "_" + str(total_size)
                 sequence.append(out_string)
 
             else:
                 print(f"unknown - {node.get_name()}, {type(node)}")
                 sequence.append("Uknown")
 
-        print(f"total of {i+1} nodes")
-        print(f" ------------------------\n")
+        print(f"processed total of {i+1} nodes")
+        # print(f" ------------------------\n")
         return i + 1, sequence
 
     def get_bytes(self, size, dtype):
@@ -909,13 +910,20 @@ class Scheduler:
             raise ValueError(f"expected only comm related nodes, got {type(node)}")
 
         name = node.get_name()
+        # print(f"{name=}")
         inner = node.node
+        # print(f"{type(inner)}")
         size = inner.get_size()
         dtype = inner.get_dtype()
         total_size = self.get_bytes(size, dtype)
         inner_size = inner.get_numel()
         print(f"{inner_size=}, {size=}")
-        wraps = inner.inputs[0].data.name
+        print(f"{node=}")
+        wraps = "?"
+        if isinstance(inner, torch._inductor.ir.Wait):
+            wraps = inner.inputs[0].name
+        else:
+            wraps = inner.inputs[0].data.name
 
         return name, total_size, wraps
 
