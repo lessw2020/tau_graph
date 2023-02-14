@@ -1154,7 +1154,14 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
 
     # node map for dependency lookups
 
-    from collections import defaultdict
+    from collections import defaultdict, deque
+
+    def add_all(q: deque, iterable):
+        if not isinstance(iterable, (list, immutable_list)):
+            q.append(iterable)
+            return
+        for elem in iterable:
+            q.append(elem)
 
     dep_node_map = defaultdict(list)
 
@@ -1182,21 +1189,27 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
     # try and build dep chain
     dep_chain = []
     param_deps = defaultdict(list)
+    q = deque()
 
     for fe in graph_info.fe_list:
         dep_chain.clear()
+        q.clear()
 
         comm_node = fe.comm_node
         # todo - handle list below
         dep = node_dep_map[comm_node][0]
-        if isinstance(dep, immutable_list):
-            dep = dep[0]
-        _debug(f"enter loop with type {type(dep)},  {dep=}")
-        dep_chain.append(dep)
-        while dep:
-            dep = node_dep_map.get(dep)
-            if dep:
-                dep_chain.append(dep)
+        add_all(q, dep)
+
+        _debug(f"enter loop with type {type(dep)},  {q=}")
+
+        while q:
+            curr = q.popleft()
+            _debug(f"{curr=}")
+            dep_chain.append(curr)
+
+            dep = node_dep_map.get(curr)
+            add_all(q, dep)
+
         param_deps[comm_node].extend(dep_chain)
 
         _debug(f"dep map of {comm_node.name} = {dep_chain}\n")
