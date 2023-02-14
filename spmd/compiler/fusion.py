@@ -9,6 +9,13 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.passes.shape_prop import TensorMetadata
 
 from spmd.compiler.log_utils import get_logger
+from spmd.compiler import config
+
+logger = get_logger("graph_opt")
+from functools import partial
+from .log_utils import rank0_debug
+
+_debug = partial(rank0_debug, logger)
 
 from .graph_utils import (
     OP,
@@ -571,7 +578,8 @@ def _finalize_output_node(
     new_output_args: List[fx.Node],
 ) -> None:
     """Reworks output node args to original grad tensors, replacing the wait_comms
-    we update a copy of the output args, then finalized after all fusion is done."""
+    we update a copy of the output args, then finalized after all fusion is done.
+    """
     replacement_mapping: Dict[fx.Node, fx.Node] = {}
 
     # map out all updated nodes in our list
@@ -942,7 +950,6 @@ def _get_last_grad_node_from_fe_group(
 def _fuse_with_jit(
     gi: GraphInfo, gm: fx.GraphModule, copy_list: List[FusionElement]
 ) -> fx.Node:
-
     # Find the actual last gradient node.
     last_grad_fe_index = _get_last_grad_node_from_fe_group(gi, copy_list)
 
@@ -1088,7 +1095,6 @@ def _scatter_results_jit(
 
 
 def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
-
     """runs fusion by creating a Just in Time buffer to use for each fusion.
     It then returns views to the buffer for the gradient outputs, avoiding the
     need to copy back to the original tensor.
@@ -1097,8 +1103,34 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
     FP32_BYTES = 4
 
     gm.recompile()
-    graph_info = GraphInfo().update_info(gm)
+    from torch.fx.immutable_collections import immutable_dict, immutable_list
 
+    # _debug(f"{gm.graph.print_tabular()}")
+    graph_info = GraphInfo().update_info(gm)
+    import torch.distributed as dist
+
+    rank = dist.get_rank()
+
+    """dWeights_name = "t_11"
+    dClone_name = "clone_1"
+    dWeights_node = None
+    dClone_node = None
+
+    for node in gm.graph.nodes:
+        if node.name == dWeights_name:
+            dWeights_node = node
+        elif node.name == dClone_name:
+            dClone_node = node
+            break
+
+    assert dClone_node is not None, f"dClone not found"
+    assert dWeights_node is not None, f"dWeights not found"
+
+    # re-order
+    dClone_node.prepend(dWeights_node)
+
+    _debug(f"Moved Node \n {gm.graph.print_tabular()}")
+    """
     fe_list = _scan_graph_for_fusion_elements(
         graph_info, gm, comm_type=CommType.ALLREDUCE
     )
@@ -1109,6 +1141,67 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
         "The expected wait_nodes in graph_info are different from the fe_list "
         f"{len(graph_info.wait_node_idx)} {len(fe_list)}."
     )
+
+    dep_map = {}
+    comm_nodes = {}  # name : input args, #input kwargs
+
+    for i, fe in enumerate(graph_info.fe_list):
+        comm_node = fe.comm_node
+        args = comm_node.args
+        comm_nodes[comm_node] = args[0]  # list of dependencies
+
+    _debug(f"comm_node mapping:\n {comm_nodes}\n")
+
+    # node map for dependency lookups
+
+    from collections import defaultdict
+
+    dep_node_map = defaultdict(list)
+
+    node_dep_map = defaultdict(list)
+    for node in gm.graph.nodes:
+        arglist = None
+        if node.args:
+            arglist = list(node.args)
+        curr_args = []
+        if not arglist:
+            node_dep_map[node] = []
+            continue
+
+        for item in arglist:
+            if isinstance(item, immutable_list):
+                for elem in item:
+                    curr_args.append(elem)
+            else:
+                curr_args.append(item)
+        node_dep_map[node].extend(curr_args)
+
+    _debug(f"NODE mapping: \n {node_dep_map=}\n")
+    # _debug(f"{dep_node_map=}\n")
+
+    # try and build dep chain
+    dep_chain = []
+    param_deps = defaultdict(list)
+
+    for fe in graph_info.fe_list:
+        dep_chain.clear()
+
+        comm_node = fe.comm_node
+        # todo - handle list below
+        dep = node_dep_map[comm_node][0]
+        if isinstance(dep, immutable_list):
+            dep = dep[0]
+        _debug(f"enter loop with type {type(dep)},  {dep=}")
+        dep_chain.append(dep)
+        while dep:
+            dep = node_dep_map.get(dep)
+            if dep:
+                dep_chain.append(dep)
+        param_deps[comm_node].extend(dep_chain)
+
+        _debug(f"dep map of {comm_node.name} = {dep_chain}\n")
+
+    _debug(f" **** Param deps: \n {param_deps=}")
 
     assert graph_info.output is not None
     new_output_args = list(cast(Tuple[fx.Node], graph_info.output.args[0]))
@@ -1122,6 +1215,7 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
     bucket_size = fusion_length * 1024 * 1024
     curr_size = 0
 
+    """
     for i, fe in enumerate(graph_info.fe_list):
         # TODO - we assume fp32 atm.
         curr_size += fe.size * FP32_BYTES
@@ -1162,9 +1256,10 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
             new_output_args,
             grad_nodes,
         )
+    """
 
     # update output with the buffer view args
-    gm.graph.erase_node(graph_info.output)
-    gm.graph.output(new_output_args)
+    # gm.graph.erase_node(graph_info.output)
+    # gm.graph.output(new_output_args)
 
     rebuild_graph(gm, remove_dead_code=True)

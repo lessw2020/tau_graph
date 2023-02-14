@@ -23,8 +23,8 @@ def setup(rank: int, world_size: int) -> None:
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
-def teardown(rank: int) -> None:
 
+def teardown(rank: int) -> None:
     # Wait for all ranks to reach here before starting shutdown.
     dist.barrier()
     dist.destroy_process_group()
@@ -48,13 +48,11 @@ def work_main(rank: int, world_size: int) -> None:
 
     _device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
-    gpu_placement = torch.arange(
-        world_size
-    )
+    gpu_placement = torch.arange(world_size)
     mesh = DeviceMesh(device_type=_device_type, mesh=gpu_placement)
-    
+
     # control depth of ReplicaModel
-    layers = 4
+    layers = 2
 
     model = ReplicaModel(layer_count=layers).to(_device_type)
 
@@ -72,9 +70,7 @@ def work_main(rank: int, world_size: int) -> None:
         spmd = SPMD(
             deepcopy(model),
             schema=Schema(
-                mesh=DeviceMesh(
-                    _device_type, gpu_placement
-                ),
+                mesh=DeviceMesh(_device_type, gpu_placement),
                 placements=[Replicate()],
             ),
             optimize_first_iter=True,
@@ -83,7 +79,7 @@ def work_main(rank: int, world_size: int) -> None:
         all_spmd.append(spmd)
 
     x = torch.randn(2, 10).to(_device_type)
-    
+
     # fire off comms
     for spmd in all_spmd:
         spmd(x).sum().backward()
@@ -105,11 +101,11 @@ def work_main(rank: int, world_size: int) -> None:
                     p2.grad / world_size
                 ), "Mismatch in resulting grads between DDP and SPMD."
 
-def main(rank: int, world_size: int) -> None:
 
+def main(rank: int, world_size: int) -> None:
     setup(rank, world_size)
     _world_size = dist.get_world_size()
-    
+
     # main work
     work_main(rank, world_size)
 
@@ -120,7 +116,7 @@ def main(rank: int, world_size: int) -> None:
 if __name__ == "__main__":
     # Note: this only works on a single node.
     os.environ["MASTER_ADDR"] = "localhost"
-    
+
     port = random.randint(49152, 65535)
     os.environ["MASTER_PORT"] = str(port)
 
