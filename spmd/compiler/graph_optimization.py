@@ -162,13 +162,15 @@ class DistGraphOptimization:
         scheduling_policy: SchedulingPolicy = SchedulingPolicy.FCFS,
         fusion_length: int = 2,
     ) -> "DistGraphOptimization":
-
         assert len(
             self._graph.bwd_graph_modules
         ), f"no bwd graph ready from {self._graph.bwd_graph_modules}"
 
+        print(f"{self.graph.grad_to_primal=}")
         run_fuse_communication_jit(
-            self._graph.bwd_graph_modules[0], fusion_length
+            self._graph.bwd_graph_modules[0],
+            fusion_length,
+            primal_map=self.graph.grad_to_primal,
         )
         return self
 

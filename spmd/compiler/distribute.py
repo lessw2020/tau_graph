@@ -297,7 +297,6 @@ def _rebuild_graph(
     gm: fx.GraphModule,
     node_replacements: Dict[torch.fx.Node, torch.fx.GraphModule],
 ) -> None:
-
     # replace nodes in local traced graph with DTensor's dispatch graph
     for node in gm.graph.nodes:
         if node not in node_replacements:
@@ -317,7 +316,6 @@ def _rebuild_graph(
         # insert DT's dispatch graph to traced local graph.
         with gm.graph.inserting_before(node):
             for dtn in traced_dispatch.graph.nodes:
-
                 if dtn.op == OP.PLACEHOLDER:
                     # do nothing, ignore placeholders, as it has already
                     # been prepared in value_remap
@@ -551,7 +549,6 @@ class _SPMD:
         gm: fx.GraphModule,
         inps: List[torch.Tensor],
     ) -> fx.GraphModule:
-
         with maybe_disable_fake_tensor_mode():
             return self._compile(training_phase, gm, original_inputs[0])
 
@@ -615,10 +612,26 @@ class _SPMD:
             self._dist_graph.fwd_graph_modules.append(parallelized_gm)
             if self._map_param_and_grad:
                 self._map_primal_to_param(parallelized_gm, inps, nparams)
+                # self.primal_to_param, self.grad_to_primal
+                # print(f"*** \n {self._dist_graph.grad_to_primal=}\n")
+                print(
+                    f"**-- \n {self._dist_graph.primal_name_to_node=}"
+                )  # _map_param_and_grad=}")
+                print(
+                    f"{self._dist_graph.fwd_graph_modules[0].graph.print_tabular()}"
+                )
         elif training_phase == TrainingPhase.BACKWARD:
             self._dist_graph.bwd_graph_modules.append(parallelized_gm)
             if self._map_param_and_grad:
                 self._map_grad_to_param(parallelized_gm)
+                # print(
+                #    f"\n ===================== \n {self._dist_graph.grad_to_primal=}"
+                # )
+                # print(f"{self._dist_graph.primal_to_param=}\n")
+                # print(
+                #    f"{self._dist_graph.bwd_graph_modules[0].graph.print_tabular()}"
+                # )
+
         return make_boxed_func(parallelized_gm)
 
 
@@ -631,7 +644,6 @@ def distribute(
     *args: Tuple[object],
     **kwargs: Dict[str, object],
 ) -> nn.Module:
-
     flat_args, _ = tree_flatten(args)
     flat_kwargs, _ = tree_flatten(kwargs)
     input_set: Set[object] = set(flat_args + flat_kwargs)
@@ -659,6 +671,7 @@ def distribute(
         return tuple(input_to_fake(x) for x in inps)
 
     spmd = _SPMD(dist_graph, param_schema, input_schemas, map_param_and_grad)
+
     compiled_m = aot_module(
         cast(nn.Module, dist_graph.orig_module),
         partial(spmd._compile_wrapper, TrainingPhase.FORWARD, original_inputs),

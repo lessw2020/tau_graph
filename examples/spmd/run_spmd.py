@@ -52,7 +52,7 @@ def work_main(rank: int, world_size: int) -> None:
     mesh = DeviceMesh(device_type=_device_type, mesh=gpu_placement)
 
     # control depth of ReplicaModel
-    layers = 2
+    layers = 5
 
     model = ReplicaModel(layer_count=layers).to(_device_type)
 

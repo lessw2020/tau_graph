@@ -59,7 +59,7 @@ class SPMD(nn.Module):
         self._optimizations = optimizations
         # TODO(anj): Remove this constant and use configs to turn
         # off brittle features.
-        self._map_param_and_grad = False
+        self._map_param_and_grad = True
 
     def forward(
         self, *args: Tuple[object], **kwargs: Dict[str, object]

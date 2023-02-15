@@ -1095,7 +1095,9 @@ def _scatter_results_jit(
 
 
 def map_grad_tensor_dependencies(
-    gm: fx.GraphModule, gi: GraphInfo
+    gm: fx.GraphModule,
+    gi: GraphInfo,
+    primal_map=None,
 ) -> Dict[fx.Node, List[fx.Node]]:
     """maps all dependencies for each grad tensor node, where grads are flagged by comm node.
     This allows us to be dependency aware for reverse k re-ordering."""
@@ -1104,16 +1106,41 @@ def map_grad_tensor_dependencies(
 
     # collect all comm nodes as these are attached to gradient tensors (ddp scenario)
 
-    # show params
-    _debug(f"Params - \n")
-    for item in gm.parameters():
-        _debug(f"param = {item}\n")
+    # see if we have a working primal map
+    grad_nodes = []
+    grad_nodes_from_comms = []
+    if primal_map:
+        _debug(f"******** \n {primal_map=}")
+        for k in primal_map[0].keys():
+            grad_nodes.append(k)
 
     all_comm_nodes = []
     for i, fe in enumerate(gi.fe_list):
         comm_node = fe.comm_node
+        all_comm_nodes.append(comm_node)
 
     _debug(f"comm_nodes :\n {all_comm_nodes=}\n")
+
+    for node in all_comm_nodes:
+        _debug(f"{node.args=}")
+        grad_node = node.args[0]
+        grad_nodes_from_comms.append(
+            grad_node[0]
+        )  # assumption - prefusion, comms are all single node
+
+    _debug(
+        f"^^^^ grad tensors found:  \n {grad_nodes_from_comms=}, \n grad_nodes_from_primals={grad_nodes}\n"
+    )
+    assert len(grad_nodes_from_comms) == len(
+        grad_nodes
+    ), f"mismatch between grad node sources {grad_nodes=}, {grad_nodes_from_comms=}"
+
+    final_grad_nodes = []
+    iterating_list = grad_nodes if grad_nodes else grad_nodes_from_comms
+    for item in iterating_list:
+        final_grad_nodes.append(item.args[0])
+
+    _debug(f"Final grad nodes = {final_grad_nodes}\n")
 
     # node map for dependency lookups
 
@@ -1189,7 +1216,9 @@ def map_grad_tensor_dependencies(
     return param_deps
 
 
-def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
+def run_fuse_communication_jit(
+    gm: fx.GraphModule, fusion_length: int, primal_map: List = None
+) -> None:
     """runs fusion by creating a Just in Time buffer to use for each fusion.
     It then returns views to the buffer for the gradient outputs, avoiding the
     need to copy back to the original tensor.
@@ -1213,7 +1242,9 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
         f"{len(graph_info.wait_node_idx)} {len(fe_list)}."
     )
 
-    param_dependencies_map = map_grad_tensor_dependencies(gm, graph_info)
+    param_dependencies_map = map_grad_tensor_dependencies(
+        gm, graph_info, primal_map=primal_map
+    )
 
     _debug(f"\n{gm.graph.print_tabular()}\n")
     # todo - remove
