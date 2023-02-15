@@ -1094,15 +1094,21 @@ def _scatter_results_jit(
     return grad_nodes
 
 
-def map_param_dependencies(
+def map_grad_tensor_dependencies(
     gm: fx.GraphModule, gi: GraphInfo
 ) -> Dict[fx.Node, List[fx.Node]]:
-    """maps all dependencies for each parameter node.
+    """maps all dependencies for each grad tensor node, where grads are flagged by comm node.
     This allows us to be dependency aware for reverse k re-ordering."""
     from torch.fx.immutable_collections import immutable_list
     from collections import defaultdict, deque
 
     # collect all comm nodes as these are attached to params
+
+    # show params
+    _debug(f"Params - \n")
+    for item in gm.parameters():
+        _debug(f"param = {item}\n")
+
     all_comm_nodes = []
     for i, fe in enumerate(gi.fe_list):
         comm_node = fe.comm_node
@@ -1207,7 +1213,7 @@ def run_fuse_communication_jit(gm: fx.GraphModule, fusion_length: int) -> None:
         f"{len(graph_info.wait_node_idx)} {len(fe_list)}."
     )
 
-    param_dependencies_map = map_param_dependencies(gm, graph_info)
+    param_dependencies_map = map_grad_tensor_dependencies(gm, graph_info)
 
     _debug(f"\n{gm.graph.print_tabular()}\n")
     # todo - remove
