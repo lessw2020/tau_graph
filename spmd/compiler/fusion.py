@@ -1102,7 +1102,7 @@ def map_grad_tensor_dependencies(
     from torch.fx.immutable_collections import immutable_list
     from collections import defaultdict, deque
 
-    # collect all comm nodes as these are attached to params
+    # collect all comm nodes as these are attached to gradient tensors (ddp scenario)
 
     # show params
     _debug(f"Params - \n")
