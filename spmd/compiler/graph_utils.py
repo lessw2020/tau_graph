@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union, Dict
 
 import torch.fx as fx
 from torch.fx.passes.shape_prop import TensorMetadata
@@ -38,6 +38,19 @@ comm_block_op_sequence: Tuple[Union[str, Set[CommType]], ...] = (
     "getitem",
     "wait_comm",
 )
+
+
+def get_node_order_maps(gm: fx.GraphModule):
+    """generates dict that maps node to it's order in the graph
+    example:  node: 10"""
+    node_order_map = {}
+    order_node_map = {}
+
+    for i, node in enumerate(gm.graph.nodes):
+        node_order_map[node] = i
+        order_node_map[i] = node
+
+    return node_order_map, order_node_map
 
 
 def get_comm_block_nodes(

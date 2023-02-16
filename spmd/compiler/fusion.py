@@ -11,6 +11,9 @@ from torch.fx.passes.shape_prop import TensorMetadata
 from spmd.compiler.log_utils import get_logger
 from spmd.compiler import config
 
+from torch.fx.immutable_collections import immutable_list
+from collections import defaultdict, deque
+
 logger = get_logger("graph_opt")
 from functools import partial
 from .log_utils import rank0_debug
@@ -24,6 +27,7 @@ from .graph_utils import (
     get_node_tensor_metadata,
     get_output_node,
     rebuild_graph,
+    get_node_order_maps,
 )
 
 
@@ -96,6 +100,9 @@ class GraphInfo:
     actual_grad_index_mapping: Dict[fx.Node, int] = field(
         default_factory=lambda: {}
     )
+    node_order_map = {}
+    order_node_map = {}
+
     global logger
     logger = get_logger("graph_opt")  # type: ignore
 
@@ -1094,6 +1101,71 @@ def _scatter_results_jit(
     return grad_nodes
 
 
+def map_all_node_dependencies(
+    gm: fx.GraphModule,
+    gi: GraphInfo,
+):
+    """iterates entire graph and produces map with dependencies for each node"""
+    from torch.fx.immutable_collections import immutable_list
+    from collections import defaultdict, deque
+
+    # build graph node to dependency mapping
+
+    node_order, order_node = get_node_order_maps(gm)
+    # save for future use
+    gi.node_order_map = node_order
+    gi.order_node_map = order_node
+
+    node_dep_map = defaultdict(list)
+    curr_args = []
+
+    def add_order(node: fx.Node) -> Tuple:
+        order = node_order.get(node, -1)
+        return (order, node)
+
+    for node in gm.graph.nodes:
+        arglist = None
+        curr_args.clear()
+
+        if node.args:
+            arglist = list(node.args)  # get rid of immutable list
+
+        if not arglist:
+            node_dep_map[node] = []
+            continue
+
+        for item in arglist:
+            if isinstance(item, (list, immutable_list)):
+                for elem in item:
+                    node_tuple = add_order(elem)
+
+                    curr_args.append(node_tuple)
+            else:
+                node_tuple = add_order(item)
+                curr_args.append(node_tuple)
+
+        node_dep_map[node].extend(curr_args)
+
+    _debug(f"NODE mapping with ordering: \n {node_dep_map=}\n")
+    return node_dep_map
+
+
+def add_all(q: deque, maybe_iterable, node_order_map=None):
+    """handles adding items from node args to q"""
+    _debug(f"add all {maybe_iterable=}")
+    if not maybe_iterable:
+        return
+
+    if not isinstance(maybe_iterable, (list, immutable_list)):
+        q.append(maybe_iterable)
+        return
+
+    for elem in maybe_iterable:
+        _debug(f"{elem=}")
+        # node_tuple = node_order_map.get(elem[1], -1)
+        q.append(elem)
+
+
 def map_grad_tensor_dependencies(
     gm: fx.GraphModule,
     gi: GraphInfo,
@@ -1101,8 +1173,6 @@ def map_grad_tensor_dependencies(
 ) -> Dict[fx.Node, List[fx.Node]]:
     """maps all dependencies for each grad tensor node, where grads are flagged by comm node.
     This allows us to be dependency aware for reverse k re-ordering."""
-    from torch.fx.immutable_collections import immutable_list
-    from collections import defaultdict, deque
 
     # collect all comm nodes as these are attached to gradient tensors (ddp scenario)
 
@@ -1143,43 +1213,8 @@ def map_grad_tensor_dependencies(
     _debug(f"Final grad nodes = {final_grad_nodes}\n")
 
     # node map for dependency lookups
+    node_dep_map = map_all_node_dependencies(gm, gi)
 
-    def add_all(q: deque, maybe_iterable):
-        if not maybe_iterable:
-            return
-
-        if not isinstance(maybe_iterable, (list, immutable_list)):
-            q.append(maybe_iterable)
-            return
-
-        for elem in maybe_iterable:
-            q.append(elem)
-
-    # build graph node to dependency mapping
-    node_dep_map = defaultdict(list)
-    curr_args = []
-
-    for node in gm.graph.nodes:
-        arglist = None
-        curr_args.clear()
-
-        if node.args:
-            arglist = list(node.args)  # get rid of immutable list
-
-        if not arglist:
-            node_dep_map[node] = []
-            continue
-
-        for item in arglist:
-            if isinstance(item, (list, immutable_list)):
-                for elem in item:
-                    curr_args.append(elem)
-            else:
-                curr_args.append(item)
-
-        node_dep_map[node].extend(curr_args)
-
-    _debug(f"NODE mapping: \n {node_dep_map=}\n")
     # _debug(f"{dep_node_map=}\n")
 
     # build dep chain for all params (comm nodes)
@@ -1194,15 +1229,23 @@ def map_grad_tensor_dependencies(
         comm_node = fe.comm_node
         # comm nodes have nodes in 0, remainder is comm specific args
         dep = node_dep_map[comm_node][0]
-        add_all(q, dep)
+        _debug(f"fe comm node args {dep=}")
+        add_all(q, dep, gi.node_order_map)
 
         # _debug(f"enter loop with type {type(dep)},  {q=}")
 
         while q:
             curr = q.popleft()
+            _debug(f"{curr=}")
+            if curr == -1:
+                continue
+
             dep_chain.append(curr)
-            dep = node_dep_map.get(curr)
-            add_all(q, dep)
+            _debug(f"{dep_chain=}")
+            _debug(f"1245, looking for {curr[1]=}")
+            dep = node_dep_map.get(curr[1])
+            _debug(f"return from node_dep_map {dep=}")
+            add_all(q, dep, gi.node_order_map)
 
         param_deps[comm_node].extend(dep_chain)
 
