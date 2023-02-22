@@ -29,6 +29,9 @@ from spmd.tensor import (
     Shard,
 )
 
+from torch._inductor.decomposition import select_decomp_table
+
+
 from .aot_function_patch import patched_aot_function
 from .distributed_graph import DistributedGraph
 from .graph_utils import OP, CommType, get_comm_block_nodes
@@ -40,6 +43,11 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 torch._functorch.aot_autograd.aot_function = patched_aot_function
 
 logger: Optional[logging.Logger] = None
+
+inductor_decompositions = select_decomp_table()
+assert (
+    inductor_decompositions is not None
+), "failed to get Inductor decomp table"
 
 
 class TrainingPhase(Enum):
@@ -177,7 +185,9 @@ def _get_dtensor_dispatch_graph(
         specs=updated_args_spec,
     )
 
-    return make_fx(dispatch)(unflattened_args)
+    return make_fx(dispatch, decomposition_table=inductor_decompositions)(
+        unflattened_args
+    )
 
 
 def _build_dummy_add_graph(
@@ -196,7 +206,9 @@ def _build_dummy_add_graph(
     grad: torch.Tensor = dt._local_tensor
     zero: torch.Tensor = torch.zeros_like(dt._local_tensor)
 
-    traced_add = make_fx(dummy_add)(grad, zero)
+    traced_add = make_fx(
+        dummy_add, decomposition_table=inductor_decompositions
+    )(grad, zero)
 
     placeholders = [n for n in traced_add.graph.nodes if n.op == OP.PLACEHOLDER]
     call_functions = [
@@ -297,7 +309,6 @@ def _rebuild_graph(
     gm: fx.GraphModule,
     node_replacements: Dict[torch.fx.Node, torch.fx.GraphModule],
 ) -> None:
-
     # replace nodes in local traced graph with DTensor's dispatch graph
     for node in gm.graph.nodes:
         if node not in node_replacements:
@@ -317,7 +328,6 @@ def _rebuild_graph(
         # insert DT's dispatch graph to traced local graph.
         with gm.graph.inserting_before(node):
             for dtn in traced_dispatch.graph.nodes:
-
                 if dtn.op == OP.PLACEHOLDER:
                     # do nothing, ignore placeholders, as it has already
                     # been prepared in value_remap
@@ -551,7 +561,6 @@ class _SPMD:
         gm: fx.GraphModule,
         inps: List[torch.Tensor],
     ) -> fx.GraphModule:
-
         with maybe_disable_fake_tensor_mode():
             return self._compile(training_phase, gm, original_inputs[0])
 
@@ -631,7 +640,6 @@ def distribute(
     *args: Tuple[object],
     **kwargs: Dict[str, object],
 ) -> nn.Module:
-
     flat_args, _ = tree_flatten(args)
     flat_kwargs, _ = tree_flatten(kwargs)
     input_set: Set[object] = set(flat_args + flat_kwargs)
