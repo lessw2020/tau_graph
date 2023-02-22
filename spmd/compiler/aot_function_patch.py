@@ -11,6 +11,18 @@ from torch._functorch.aot_autograd import (
     default_partition,
 )
 
+from torch._inductor.decomposition import select_decomp_table
+
+inductor_decomps = select_decomp_table()
+
+
+def merge_decomps(curr_decomps=None) -> Dict[object, object]:
+    if curr_decomps:
+        updated_decomps = {**curr_decomps, **inductor_decomps}
+        return updated_decomps
+    else:
+        return inductor_decomps
+
 
 def patched_aot_function(
     fn: Callable[..., object],
@@ -105,12 +117,15 @@ def patched_aot_function(
     if bw_compiler is None:
         bw_compiler = fw_compiler
 
+    # merge decomps if needed
+    updated_decomps = merge_decomps(decompositions)
+
     aot_config = AOTConfig(
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         partition_fn=partition_fn,
         # pyre-fixme
-        decompositions=decompositions,  # type:ignore[arg-type]
+        decompositions=updated_decomps,  # type:ignore[arg-type]
         num_params_buffers=num_params_buffers,
         aot_id=next(AOT_COUNTER),
         keep_inference_input_mutations=True,
