@@ -4,19 +4,17 @@ import os
 
 import torch
 
-import pippy.fx
 
+PIPPY_VERBOSITY = os.environ.get("PIPPY_VERBOSITY")
+if PIPPY_VERBOSITY not in [None, "WARNING", "INFO", "DEBUG"]:
+    logging.warning(f"Unsupported PIPPY_VERBOSITY level: {PIPPY_VERBOSITY}")
+    PIPPY_VERBOSITY = None
 
-PIPPY_VERBOSITY = os.environ.get("PIPPY_VERBOSITY", "OFF")
-
-if PIPPY_VERBOSITY == "DEBUG":
-    logging.getLogger().setLevel(logging.DEBUG)
-elif PIPPY_VERBOSITY == "INFO":
-    logging.getLogger().setLevel(logging.INFO)
-elif PIPPY_VERBOSITY == "OFF":
-    pass
-else:
-    print(f"Unsupported PIPPY_VERBOSITY level: {PIPPY_VERBOSITY}")
+if PIPPY_VERBOSITY:
+    logging.getLogger("pippy").setLevel(PIPPY_VERBOSITY)
+    # It seems we need to print something to make the level setting effective
+    # for child loggers. Doing it here.
+    logging.warning(f"Setting PiPPy logging level to: {PIPPY_VERBOSITY}")
 
 
 def friendly_debug_info(v):
@@ -27,4 +25,4 @@ def friendly_debug_info(v):
 
 
 def map_debug_info(a):
-    return pippy.fx.node.map_aggregate(a, friendly_debug_info)
+    return torch.fx.node.map_aggregate(a, friendly_debug_info)
