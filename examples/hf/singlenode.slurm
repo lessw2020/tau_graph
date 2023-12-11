@@ -6,7 +6,7 @@
 
 #SBATCH --nodes=1
 
-#SBATCH --gpus-per-task=8
+#SBATCH --gpus-per-task=4
 
 #SBATCH --cpus-per-task=96
 
@@ -48,5 +48,5 @@ export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
 dcgmi profile --pause
 # adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
 # to your specific node count, and update target launch file.
-srun torchrun --nnodes 1 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" ./multinode_bfs.py
+srun torchrun --nnodes 1 --nproc_per_node 4 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" ./pegasus.py
 dcgmi profile --resume
